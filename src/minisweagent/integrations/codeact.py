@@ -144,6 +144,7 @@ class CodeActRunner:
             enable_mcp=False,
             runtime="cli",
         )
+        agent_cfg.model_post_init(None)
         cfg = OpenHandsConfig(
             llms={"llm": LLMConfig(**self.llm_config)},
             agents={"agent": agent_cfg},
@@ -200,7 +201,6 @@ class CodeActRunner:
         )
 
         agent_config = config.get_agent_config()
-        agent_config.max_iterations = self.max_steps
         agent = CodeActAgent(config=agent_config, llm_registry=llm_registry)
 
         controller = AgentController(
