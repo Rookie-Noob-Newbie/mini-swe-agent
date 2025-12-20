@@ -230,11 +230,13 @@ class CodeActRunner:
 
             if isinstance(action, AgentFinishAction):
                 exit_status = "finished"
-                result = (
-                    action.outputs.get("content")
-                    if isinstance(action.outputs, dict)
-                    else action.final_thought or ""
-                )
+                result = ""
+                if isinstance(action.outputs, dict) and action.outputs.get("content"):
+                    result = action.outputs.get("content", "") or ""
+                if not result:
+                    result = getattr(action, "final_thought", "") or ""
+                if not result:
+                    result = getattr(action, "thought", "") or ""
                 state.history.append(action)
                 break
 
