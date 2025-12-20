@@ -137,6 +137,7 @@ class CodeActRunner:
     def _make_config(self) -> OpenHandsConfig:
         llm_data = dict(self.llm_config)
         llm_data.setdefault("custom_llm_provider", "openai")
+        llm_data.setdefault("timeout", 120)
         agent_cfg = AgentConfig(
             enable_browsing=False,
             enable_jupyter=False,
@@ -211,13 +212,21 @@ class CodeActRunner:
 
         exit_status = "timeout"
         result = ""
-        for _ in range(self.max_steps):
+        deadline = time.time() + 600  # 10 minutes wall-clock guard
+        for step_idx in range(self.max_steps):
+            if time.time() > deadline:
+                exit_status = "timeout"
+                result = "Agent wall-clock timeout"
+                break
+            oh_logger.info(f"[CodeActRunner] iter={step_idx+1} sid={sid} calling agent.step")
             try:
                 action = agent.step(state)
             except Exception as e:  # LLM or parsing failure
                 exit_status = "error"
                 result = f"Agent step failed: {e}"
                 break
+
+            oh_logger.info(f"[CodeActRunner] iter={step_idx+1} sid={sid} got action {type(action).__name__}")
 
             if isinstance(action, AgentFinishAction):
                 exit_status = "finished"
