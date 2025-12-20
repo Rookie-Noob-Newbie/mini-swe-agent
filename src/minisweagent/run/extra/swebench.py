@@ -138,7 +138,8 @@ def process_instance(
     # avoid inconsistent state if something here fails and there's leftover previous files
     remove_from_preds_file(output_dir / "preds.json", instance_id)
     (instance_dir / f"{instance_id}.traj.json").unlink(missing_ok=True)
-    model = get_model(config=config.get("model", {}))
+    use_codeact = config.get("environment", {}).get("environment_class") == "codeact"
+    model = None if use_codeact else get_model(config=config.get("model", {}))
     task = instance["problem_statement"]
 
     progress_manager.on_instance_start(instance_id)
@@ -148,7 +149,6 @@ def process_instance(
     extra_info = None
 
     try:
-        use_codeact = config.get("environment", {}).get("environment_class") == "codeact"
         env = get_sb_environment(config, instance)
         if use_codeact:
             runner = CodeActRunner(
