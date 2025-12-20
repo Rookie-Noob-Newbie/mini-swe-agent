@@ -7,6 +7,7 @@ import concurrent.futures
 import json
 import random
 import re
+import shutil
 import threading
 import time
 import traceback
