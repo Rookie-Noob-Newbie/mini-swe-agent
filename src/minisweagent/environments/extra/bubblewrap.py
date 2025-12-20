@@ -15,12 +15,13 @@ import os
 import platform
 import shutil
 import subprocess
-import tempfile
 import uuid
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
+
+from minisweagent.utils.paths import get_repo_tmp
 
 
 class BubblewrapEnvironmentConfig(BaseModel):
@@ -72,7 +73,7 @@ class BubblewrapEnvironment:
         """
         self.logger = logger or logging.getLogger("minisweagent.environment")
         self.config = config_class(**kwargs)
-        self.working_dir = Path(tempfile.gettempdir()) / f"minisweagent-{uuid.uuid4().hex[:8]}"
+        self.working_dir = get_repo_tmp() / f"minisweagent-{uuid.uuid4().hex[:8]}"
         self.working_dir.mkdir(parents=True)
 
     def execute(self, command: str, cwd: str = "", *, timeout: int | None = None) -> dict[str, Any]:

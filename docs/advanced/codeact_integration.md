@@ -110,7 +110,7 @@ Run:
 ```bash
 mini-extra swebench --subset verified --split test \
   --config src/minisweagent/config/extra/swebench_codeact.yaml \
-  --workers 1 --output /tmp/mini-codeact-out
+  --workers 1 --output tmp/mini-codeact-out
 ```
 
 ## Testing checklist

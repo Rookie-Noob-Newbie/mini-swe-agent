@@ -1,6 +1,5 @@
 import asyncio
 import os
-import tempfile
 import threading
 import time
 import uuid
@@ -34,6 +33,8 @@ from openhands.runtime.base import Runtime
 from openhands.runtime.runtime_status import RuntimeStatus
 from openhands.server.services.conversation_stats import ConversationStats
 from openhands.storage.local import LocalFileStore
+
+from minisweagent.utils.paths import get_repo_tmp
 
 
 class _MiniRuntime(Runtime):
@@ -129,9 +130,7 @@ class CodeActRunner:
         self.env = env
         self.llm_config = llm_config
         self.max_steps = max_steps
-        self.file_store_root = file_store_root or os.path.join(
-            tempfile.gettempdir(), "codeact_mswea_store"
-        )
+        self.file_store_root = file_store_root or str(get_repo_tmp() / "codeact_mswea_store")
         self.run_id = run_id
 
     def _make_config(self) -> OpenHandsConfig:

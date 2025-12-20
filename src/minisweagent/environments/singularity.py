@@ -4,12 +4,13 @@ import logging
 import os
 import shutil
 import subprocess
-import tempfile
 import uuid
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
+
+from minisweagent.utils.paths import get_repo_tmp
 
 
 class SingularityEnvironmentConfig(BaseModel):
@@ -40,7 +41,7 @@ class SingularityEnvironment:
         # Building the sandbox can fail (very rarely), so we retry it
         max_retries = self.config.sandbox_build_retries
         for attempt in range(max_retries):
-            sandbox_dir = Path(tempfile.gettempdir()) / f"minisweagent-{uuid.uuid4().hex[:8]}"
+            sandbox_dir = get_repo_tmp() / f"minisweagent-{uuid.uuid4().hex[:8]}"
             try:
                 subprocess.run(
                     [self.config.executable, "build", "--sandbox", sandbox_dir, self.config.image],
