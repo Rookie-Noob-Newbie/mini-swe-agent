@@ -143,14 +143,12 @@ class CodeActRunner:
             enable_condensation_request=False,
             enable_mcp=False,
             runtime="cli",
-            max_iterations=self.max_steps,
         )
         cfg = OpenHandsConfig(
             llms={"llm": LLMConfig(**self.llm_config)},
             agents={"agent": agent_cfg},
             default_agent="agent",
             sandbox=SandboxConfig(),
-            max_iterations=self.max_steps,
         )
         return cfg
 
@@ -201,7 +199,9 @@ class CodeActRunner:
             sid=sid,
         )
 
-        agent = CodeActAgent(config=config.get_agent_config(), llm_registry=llm_registry)
+        agent_config = config.get_agent_config()
+        agent_config.max_iterations = self.max_steps
+        agent = CodeActAgent(config=agent_config, llm_registry=llm_registry)
 
         controller = AgentController(
             agent=agent,
