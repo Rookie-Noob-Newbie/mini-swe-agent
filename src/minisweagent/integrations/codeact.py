@@ -116,6 +116,7 @@ class CodeActResult:
     exit_status: str
     result: str
     steps_path: str | None = None
+    history_path: str | None = None
 
 
 class CodeActRunner:
@@ -181,6 +182,7 @@ class CodeActRunner:
         file_store_path = os.path.join(self.file_store_root, sid)
         os.makedirs(file_store_path, exist_ok=True)
         steps_path = os.path.join(file_store_path, "steps.jsonl")
+        history_path = os.path.join(file_store_path, "history.jsonl")
         file_store = LocalFileStore(file_store_path)
 
         config = self._make_config()
@@ -215,12 +217,7 @@ class CodeActRunner:
 
         exit_status = "timeout"
         result = ""
-        deadline = time.time() + 600  # 10 minutes wall-clock guard
         for step_idx in range(self.max_steps):
-            if time.time() > deadline:
-                exit_status = "timeout"
-                result = "Agent wall-clock timeout"
-                break
             ms_logger.info(f"[CodeActRunner] iter={step_idx+1} sid={sid} calling agent.step")
             try:
                 action = agent.step(state)
@@ -289,10 +286,31 @@ class CodeActRunner:
 
         ms_logger.info(f"[CodeActRunner] end run_instance sid={sid} status={exit_status}")
 
+        # persist full history (system + user + actions + observations)
+        try:
+            with open(history_path, "w", encoding="utf-8") as f:
+                for ev in state.history:
+                    rec = {
+                        "type": type(ev).__name__,
+                        "source": getattr(ev, "source", None),
+                        "content": getattr(ev, "content", None),
+                        "command": getattr(ev, "command", None),
+                        "thought": getattr(ev, "thought", None),
+                        "outputs": getattr(ev, "outputs", None),
+                    }
+                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        except Exception as e:
+            ms_logger.error(f"[CodeActRunner] failed to write history log: {e}")
+
         try:
             runtime.close()
             event_stream.close()
         except Exception:
             pass
 
-        return CodeActResult(exit_status=exit_status, result=result, steps_path=steps_path)
+        return CodeActResult(
+            exit_status=exit_status,
+            result=result,
+            steps_path=steps_path,
+            history_path=history_path,
+        )

@@ -168,6 +168,11 @@ def process_instance(
                     shutil.copy(res.steps_path, instance_dir / "codeact_steps.jsonl")
                 except Exception as e:
                     logger.error(f"Failed to copy steps log: {e}", exc_info=True)
+            if res.history_path:
+                try:
+                    shutil.copy(res.history_path, instance_dir / "codeact_history.jsonl")
+                except Exception as e:
+                    logger.error(f"Failed to copy history log: {e}", exc_info=True)
         else:
             agent = ProgressTrackingAgent(
                 model,
