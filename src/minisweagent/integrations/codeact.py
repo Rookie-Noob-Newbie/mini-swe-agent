@@ -24,6 +24,7 @@ from openhands.events.action import MessageAction
 from openhands.events.action.commands import CmdRunAction
 from openhands.events.action.agent import AgentFinishAction
 from openhands.events.observation import (
+    AgentThinkObservation,
     CmdOutputObservation,
     ErrorObservation,
     Observation,
@@ -232,6 +233,8 @@ class CodeActRunner:
 
             if isinstance(action, CmdRunAction):
                 obs = runtime.run(action)
+            elif hasattr(action, "action") and getattr(action, "action", "") == "think":
+                obs = AgentThinkObservation(action.thought)
             else:
                 obs = ErrorObservation(f"Action type {type(action).__name__} not supported in CodeActRunner")
 
