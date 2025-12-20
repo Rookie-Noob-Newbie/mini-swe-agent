@@ -137,6 +137,23 @@ class CodeActRunner:
         self.file_store_root = file_store_root or str(get_repo_tmp() / "codeact_mswea_store")
         self.run_id = run_id
 
+    def _collect_patch(self) -> str:
+        """Collect working-tree diff from the task repo inside the container."""
+        try:
+            resp = self.env.execute("git -C /testbed diff")
+        except Exception as e:  # pragma: no cover
+            ms_logger.error(f"[CodeActRunner] failed to collect patch: {e}")
+            return ""
+        rc = resp.get("returncode", resp.get("exit_code", 0))
+        output = resp.get("output", "")
+        if rc != 0:
+            ms_logger.error(f"[CodeActRunner] git diff failed rc={rc}")
+            return ""
+        if output and output.strip():
+            ms_logger.info(f"[CodeActRunner] collected git diff patch ({len(output)} chars)")
+            return output
+        return ""
+
     def _make_config(self) -> OpenHandsConfig:
         llm_data = dict(self.llm_config)
         llm_data.setdefault("custom_llm_provider", "openai")
@@ -287,6 +304,12 @@ class CodeActRunner:
             result = "Agent reached max steps without finishing"
 
         ms_logger.info(f"[CodeActRunner] end run_instance sid={sid} status={exit_status}")
+
+        # Prefer returning the actual code diff when available.
+        if exit_status == "finished":
+            patch = self._collect_patch()
+            if patch:
+                result = patch
 
         # persist full history (system + user + actions + observations)
         try:
