@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from minisweagent import Environment
+from minisweagent.utils.log import logger as ms_logger
 
 from openhands.agenthub.codeact_agent.codeact_agent import CodeActAgent
 from openhands.controller.state.state import State
@@ -17,7 +18,6 @@ from openhands.core.config import (
     SandboxConfig,
 )
 from openhands.core.config.llm_config import LLMConfig
-from openhands.core.logger import openhands_logger as oh_logger
 from openhands.core.schema import AgentState
 from openhands.events import EventSource, EventStream, EventStreamSubscriber
 from openhands.events.action import MessageAction
@@ -206,7 +206,7 @@ class CodeActRunner:
         user_msg._source = EventSource.USER  # type: ignore[attr-defined]
         state.history.append(user_msg)
 
-        oh_logger.info(
+        ms_logger.info(
             f"[CodeActRunner] start run_instance sid={sid} model={agent.llm.config.model} max_steps={self.max_steps}"
         )
 
@@ -218,7 +218,7 @@ class CodeActRunner:
                 exit_status = "timeout"
                 result = "Agent wall-clock timeout"
                 break
-            oh_logger.info(f"[CodeActRunner] iter={step_idx+1} sid={sid} calling agent.step")
+            ms_logger.info(f"[CodeActRunner] iter={step_idx+1} sid={sid} calling agent.step")
             try:
                 action = agent.step(state)
             except Exception as e:  # LLM or parsing failure
@@ -226,7 +226,7 @@ class CodeActRunner:
                 result = f"Agent step failed: {e}"
                 break
 
-            oh_logger.info(f"[CodeActRunner] iter={step_idx+1} sid={sid} got action {type(action).__name__}")
+            ms_logger.info(f"[CodeActRunner] iter={step_idx+1} sid={sid} got action {type(action).__name__}")
 
             if isinstance(action, AgentFinishAction):
                 exit_status = "finished"
@@ -249,6 +249,14 @@ class CodeActRunner:
 
             obs._source = EventSource.ENVIRONMENT  # type: ignore[attr-defined]
             state.history.append(obs)
+            if isinstance(obs, CmdOutputObservation):
+                ms_logger.info(
+                    f"[CodeActRunner] iter={step_idx+1} sid={sid} obs CmdOutput exit={obs.exit_code} len={len(obs.content)}"
+                )
+            elif isinstance(obs, ErrorObservation):
+                ms_logger.error(f"[CodeActRunner] iter={step_idx+1} sid={sid} obs Error: {obs.content}")
+            else:
+                ms_logger.info(f"[CodeActRunner] iter={step_idx+1} sid={sid} obs {type(obs).__name__}")
 
             # Track iterations
             state.iteration_flag.current_value += 1
@@ -261,7 +269,7 @@ class CodeActRunner:
             exit_status = "timeout"
             result = "Agent reached max steps without finishing"
 
-        oh_logger.info(f"[CodeActRunner] end run_instance sid={sid} status={exit_status}")
+        ms_logger.info(f"[CodeActRunner] end run_instance sid={sid} status={exit_status}")
 
         try:
             runtime.close()
