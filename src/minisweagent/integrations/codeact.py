@@ -13,11 +13,11 @@ from openhands.controller.agent_controller import AgentController
 from openhands.controller.state.state import State
 from openhands.core.config import (
     AgentConfig,
-    LLMConfig,
     MCPConfig,
     OpenHandsConfig,
     SandboxConfig,
 )
+from openhands.core.config.llm_config import LLMConfig
 from openhands.core.logger import openhands_logger as oh_logger
 from openhands.core.schema import AgentState
 from openhands.events import EventSource, EventStream, EventStreamSubscriber
@@ -128,7 +128,7 @@ class CodeActRunner:
         run_id: str | None = None,
     ):
         self.env = env
-        self.llm_config = llm_config
+        self.llm_config = llm_config or {}
         self.max_steps = max_steps
         self.file_store_root = file_store_root or str(get_repo_tmp() / "codeact_mswea_store")
         self.run_id = run_id
