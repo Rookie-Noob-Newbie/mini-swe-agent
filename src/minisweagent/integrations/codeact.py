@@ -170,18 +170,6 @@ class CodeActRunner:
         )
         return runtime
 
-    def _wait_until_done(self, controller: AgentController, deadline: float) -> None:
-        while time.time() < deadline:
-            state = controller.get_agent_state()
-            if state in (
-                AgentState.FINISHED,
-                AgentState.ERROR,
-                AgentState.REJECTED,
-            ):
-                return
-            time.sleep(0.1)
-        oh_logger.warning("CodeActRunner hit wall-clock timeout waiting for completion.")
-
     def run_instance(self, task: str) -> CodeActResult:
         sid = self.run_id or f"codeact-{uuid.uuid4().hex[:8]}"
         file_store_path = os.path.join(self.file_store_root, sid)
