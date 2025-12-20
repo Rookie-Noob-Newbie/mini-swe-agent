@@ -9,7 +9,6 @@ from typing import Any
 from minisweagent import Environment
 
 from openhands.agenthub.codeact_agent.codeact_agent import CodeActAgent
-from openhands.controller.agent_controller import AgentController
 from openhands.controller.state.state import State
 from openhands.core.config import (
     AgentConfig,
@@ -23,6 +22,7 @@ from openhands.core.schema import AgentState
 from openhands.events import EventSource, EventStream, EventStreamSubscriber
 from openhands.events.action import MessageAction
 from openhands.events.action.commands import CmdRunAction
+from openhands.events.action.agent import AgentFinishAction
 from openhands.events.observation import (
     CmdOutputObservation,
     ErrorObservation,
@@ -203,64 +203,63 @@ class CodeActRunner:
         agent_config = config.get_agent_config()
         agent = CodeActAgent(config=agent_config, llm_registry=llm_registry)
 
+        # Build initial state/history (synchronous loop; no asyncio)
+        state = State(session_id=sid, conversation_stats=conversation_stats)
+        state.agent_state = AgentState.RUNNING
+        system_msg = agent.get_system_message()
+        if system_msg:
+            system_msg._source = EventSource.AGENT  # type: ignore[attr-defined]
+            state.history.append(system_msg)
+        user_msg = MessageAction(content=task, wait_for_response=False)
+        user_msg._source = EventSource.USER  # type: ignore[attr-defined]
+        state.history.append(user_msg)
+
         oh_logger.info(
             f"[CodeActRunner] start run_instance sid={sid} model={agent.llm.config.model} max_steps={self.max_steps}"
         )
 
-        controller = AgentController(
-            agent=agent,
-            event_stream=event_stream,
-            conversation_stats=conversation_stats,
-            iteration_delta=self.max_steps,
-            budget_per_task_delta=None,
-            agent_to_llm_config=config.get_agent_to_llm_config_map(),
-            agent_configs=config.get_agent_configs(),
-            sid=sid,
-            headless_mode=True,
-            status_callback=None,
-        )
+        exit_status = "timeout"
+        result = ""
+        for _ in range(self.max_steps):
+            try:
+                action = agent.step(state)
+            except Exception as e:  # LLM or parsing failure
+                exit_status = "error"
+                result = f"Agent step failed: {e}"
+                break
 
-        finished = {"status": "", "result": ""}
-        finished_lock = threading.Lock()
+            if isinstance(action, AgentFinishAction):
+                exit_status = "finished"
+                result = (
+                    action.outputs.get("content")
+                    if isinstance(action.outputs, dict)
+                    else action.final_thought or ""
+                )
+                state.history.append(action)
+                break
 
-        def _observer(event):
-            from openhands.events.action import AgentFinishAction
-            from openhands.events.observation import AgentStateChangedObservation
+            state.history.append(action)
 
-            if isinstance(event, AgentFinishAction):
-                with finished_lock:
-                    finished["status"] = "finished"
-                    finished["result"] = (
-                        event.outputs.get("content")
-                        if isinstance(event.outputs, dict)
-                        else event.final_thought or ""
-                    )
-            elif isinstance(event, AgentStateChangedObservation):
-                if event.agent_state == AgentState.ERROR:
-                    with finished_lock:
-                        finished["status"] = "error"
-                        finished["result"] = (
-                            controller.state.last_error or "Agent error"
-                        )
+            if isinstance(action, CmdRunAction):
+                obs = runtime.run(action)
+            else:
+                obs = ErrorObservation(f"Action type {type(action).__name__} not supported in CodeActRunner")
 
-        event_stream.subscribe(EventStreamSubscriber.MAIN, _observer, f"observer-{sid}")
+            obs._source = EventSource.ENVIRONMENT  # type: ignore[attr-defined]
+            state.history.append(obs)
 
-        # Kick off with initial user message
-        msg = MessageAction(content=task, wait_for_response=False)
-        event_stream.add_event(msg, EventSource.USER)
+            # Track iterations
+            state.iteration_flag.current_value += 1
 
-        # Wait for completion or timeout
-        self._wait_until_done(controller, time.time() + 60 * 5)
+            if isinstance(obs, ErrorObservation):
+                exit_status = "error"
+                result = obs.content
+                break
+        else:
+            exit_status = "timeout"
+            result = "Agent reached max steps without finishing"
 
-        with finished_lock:
-            status = finished["status"] or controller.get_agent_state().name.lower()
-            result = finished["result"] or controller.state.last_error or ""
-            if not finished["status"] and status not in ("finished", "error", "rejected"):
-                status = "timeout"
-                if not result:
-                    result = "Agent wall-clock timeout"
-
-        oh_logger.info(f"[CodeActRunner] end run_instance sid={sid} status={status}")
+        oh_logger.info(f"[CodeActRunner] end run_instance sid={sid} status={exit_status}")
 
         try:
             runtime.close()
@@ -268,4 +267,4 @@ class CodeActRunner:
         except Exception:
             pass
 
-        return CodeActResult(exit_status=status, result=result)
+        return CodeActResult(exit_status=exit_status, result=result)
