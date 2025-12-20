@@ -3,6 +3,7 @@ model:
   base_url: "http://gw-bzokqkvr2cblz8ok6y.cn-wulanchabu-acdr-1.pai-eas.aliyuncs.com/api/predict/a_1218_16_sj/v1"
   api_key: "ODE0NzIzMjI1Y2Y2MDhhNDMyNWYxYmE0NzVlMDZiOTI0MzM1ZjViNg=="
   num_retries: 10
+  custom_llm_provider: "openai"  # needed by litellm
   temperature: 0.8
   top_p: 1.0
   native_tool_calling: true

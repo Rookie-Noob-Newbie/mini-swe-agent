@@ -134,6 +134,8 @@ class CodeActRunner:
         self.run_id = run_id
 
     def _make_config(self) -> OpenHandsConfig:
+        llm_data = dict(self.llm_config)
+        llm_data.setdefault("custom_llm_provider", "openai")
         agent_cfg = AgentConfig(
             enable_browsing=False,
             enable_jupyter=False,
@@ -146,7 +148,7 @@ class CodeActRunner:
         )
         agent_cfg.model_post_init(None)
         cfg = OpenHandsConfig(
-            llms={"llm": LLMConfig(**self.llm_config)},
+            llms={"llm": LLMConfig(**llm_data)},
             agents={"agent": agent_cfg},
             default_agent="agent",
             sandbox=SandboxConfig(),
