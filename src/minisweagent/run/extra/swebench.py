@@ -80,7 +80,13 @@ def get_swebench_docker_image_name(instance: dict) -> str:
 
 def get_sb_environment(config: dict, instance: dict) -> Environment:
     env_config = config.setdefault("environment", {})
-    env_config["environment_class"] = env_config.get("environment_class", "docker")
+    env_class = env_config.get("environment_class", "docker")
+    if env_class == "codeact":
+        # CodeAct uses CodeActAgent for decisions but still runs commands via docker exec.
+        env_class = "docker"
+        env_config["environment_class"] = env_class
+    else:
+        env_config["environment_class"] = env_class
     image_name = get_swebench_docker_image_name(instance)
     if env_config["environment_class"] == "docker":
         env_config["image"] = image_name
