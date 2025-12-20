@@ -26,6 +26,7 @@ from minisweagent.models import get_model
 from minisweagent.run.extra.utils.batch_progress import RunBatchProgressManager
 from minisweagent.run.utils.save import save_traj
 from minisweagent.utils.log import add_file_handler, logger
+from minisweagent.integrations.codeact import CodeActRunner
 
 _HELP_TEXT = """Run mini-SWE-agent on SWEBench instances.
 
@@ -142,14 +143,24 @@ def process_instance(
 
     try:
         env = get_sb_environment(config, instance)
-        agent = ProgressTrackingAgent(
-            model,
-            env,
-            progress_manager=progress_manager,
-            instance_id=instance_id,
-            **config.get("agent", {}),
-        )
-        exit_status, result = agent.run(task)
+        if config.get("environment", {}).get("environment_class") == "codeact":
+            runner = CodeActRunner(
+                env=env,
+                llm_config=config.get("model", {}),
+                max_steps=config.get("agent", {}).get("max_steps", 100),
+                run_id=config.get("run", {}).get("run_id", None),
+            )
+            res = runner.run_instance(task)
+            exit_status, result = res.exit_status, res.result
+        else:
+            agent = ProgressTrackingAgent(
+                model,
+                env,
+                progress_manager=progress_manager,
+                instance_id=instance_id,
+                **config.get("agent", {}),
+            )
+            exit_status, result = agent.run(task)
     except Exception as e:
         logger.error(f"Error processing instance {instance_id}: {e}", exc_info=True)
         exit_status, result = type(e).__name__, str(e)

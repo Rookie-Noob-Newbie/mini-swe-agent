@@ -71,6 +71,7 @@ nav:
       - "Global configuration": advanced/global_configuration.md
       - "Yaml config files": advanced/yaml_configuration.md
       - "Environments": advanced/environments.md
+      - "Integrate CodeActAgent (OpenHands)": advanced/codeact_integration.md
       - "Control flow": advanced/control_flow.md
       - "Python bindings": advanced/cookbook.md
     - "FAQ": faq.md

@@ -1,0 +1,14 @@
+model:
+  model_name: llm.glm46_eval_1
+  # base_url, api_key, etc. should follow your OpenHands config.toml section.
+
+environment:
+  environment_class: codeact
+  # image is set per-instance by get_swebench_docker_image_name
+  # forward_env/env can be set here if needed.
+
+agent:
+  max_steps: 100
+
+run:
+  env_startup_command: ""  # optional; can stay empty
