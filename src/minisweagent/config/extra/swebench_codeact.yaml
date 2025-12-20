@@ -1,14 +1,19 @@
 model:
-  model_name: llm.glm46_eval_1
-  # base_url, api_key, etc. should follow your OpenHands config.toml section.
+  model: "openai/glm4.6_01"        # 或你网关要求的名字（有的网关用 GLM-4.6、glm4.6_01），与 404 报错一致即可
+  base_url: "http://gw-bzokqkvr2cblz8ok6y.cn-wulanchabu-acdr-1.pai-eas.aliyuncs.com/api/predict/a_1218_16_sj/v1"
+  api_key: "ODE0NzIzMjI1Y2Y2MDhhNDMyNWYxYmE0NzVlMDZiOTI0MzM1ZjViNg=="
+  num_retries: 10
+  temperature: 0.8
+  top_p: 1.0
+  native_tool_calling: true
+  log_completions: false   # 如需日志可改 true 并指定 log_completions_folder
+  drop_params: true        # 保持 OpenHands 默认参数裁剪
 
 environment:
   environment_class: codeact
-  # image is set per-instance by get_swebench_docker_image_name
-  # forward_env/env can be set here if needed.
 
 agent:
   max_steps: 100
 
 run:
-  env_startup_command: ""  # optional; can stay empty
+  env_startup_command: ""
