@@ -162,6 +162,12 @@ def process_instance(
             res = runner.run_instance(task)
             exit_status, result = res.exit_status, res.result
             progress_manager.update_instance_status(instance_id, f"CodeAct: {exit_status}")
+            # copy steps log to instance dir for inspection
+            if res.steps_path:
+                try:
+                    shutil.copy(res.steps_path, instance_dir / "codeact_steps.jsonl")
+                except Exception as e:
+                    logger.error(f"Failed to copy steps log: {e}", exc_info=True)
         else:
             agent = ProgressTrackingAgent(
                 model,

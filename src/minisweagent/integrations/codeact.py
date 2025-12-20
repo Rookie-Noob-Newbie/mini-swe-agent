@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import threading
 import time
@@ -114,6 +115,7 @@ class _MiniRuntime(Runtime):
 class CodeActResult:
     exit_status: str
     result: str
+    steps_path: str | None = None
 
 
 class CodeActRunner:
@@ -178,6 +180,7 @@ class CodeActRunner:
         sid = self.run_id or f"codeact-{uuid.uuid4().hex[:8]}"
         file_store_path = os.path.join(self.file_store_root, sid)
         os.makedirs(file_store_path, exist_ok=True)
+        steps_path = os.path.join(file_store_path, "steps.jsonl")
         file_store = LocalFileStore(file_store_path)
 
         config = self._make_config()
@@ -258,6 +261,21 @@ class CodeActRunner:
             else:
                 ms_logger.info(f"[CodeActRunner] iter={step_idx+1} sid={sid} obs {type(obs).__name__}")
 
+            # persist step
+            step_rec = {
+                "iter": step_idx + 1,
+                "action_type": type(action).__name__,
+                "action": getattr(action, "command", None) or getattr(action, "thought", None) or getattr(action, "final_thought", None),
+                "observation_type": type(obs).__name__,
+                "exit_code": getattr(obs, "exit_code", None),
+                "obs_len": len(getattr(obs, "content", "") or ""),
+            }
+            try:
+                with open(steps_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(step_rec, ensure_ascii=False) + "\n")
+            except Exception as e:
+                ms_logger.error(f"[CodeActRunner] failed to write steps log: {e}")
+
             # Track iterations
             state.iteration_flag.current_value += 1
 
@@ -277,4 +295,4 @@ class CodeActRunner:
         except Exception:
             pass
 
-        return CodeActResult(exit_status=exit_status, result=result)
+        return CodeActResult(exit_status=exit_status, result=result, steps_path=steps_path)
