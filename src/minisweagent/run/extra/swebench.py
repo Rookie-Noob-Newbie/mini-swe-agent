@@ -148,8 +148,9 @@ def process_instance(
     extra_info = None
 
     try:
+        use_codeact = config.get("environment", {}).get("environment_class") == "codeact"
         env = get_sb_environment(config, instance)
-        if config.get("environment", {}).get("environment_class") == "codeact":
+        if use_codeact:
             runner = CodeActRunner(
                 env=env,
                 llm_config=config.get("model", {}),
