@@ -151,6 +151,8 @@ def process_instance(
     try:
         env = get_sb_environment(config, instance)
         if use_codeact:
+            progress_manager.update_instance_status(instance_id, "CodeAct: starting")
+            logger.info(f"[CodeAct] Starting instance {instance_id}")
             runner = CodeActRunner(
                 env=env,
                 llm_config=config.get("model", {}),
@@ -159,6 +161,7 @@ def process_instance(
             )
             res = runner.run_instance(task)
             exit_status, result = res.exit_status, res.result
+            progress_manager.update_instance_status(instance_id, f"CodeAct: {exit_status}")
         else:
             agent = ProgressTrackingAgent(
                 model,
@@ -170,6 +173,8 @@ def process_instance(
             exit_status, result = agent.run(task)
     except Exception as e:
         logger.error(f"Error processing instance {instance_id}: {e}", exc_info=True)
+        if use_codeact:
+            progress_manager.update_instance_status(instance_id, f"CodeAct error: {type(e).__name__}")
         exit_status, result = type(e).__name__, str(e)
         extra_info = {"traceback": traceback.format_exc()}
     finally:

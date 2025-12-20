@@ -203,6 +203,10 @@ class CodeActRunner:
         agent_config = config.get_agent_config()
         agent = CodeActAgent(config=agent_config, llm_registry=llm_registry)
 
+        oh_logger.info(
+            f"[CodeActRunner] start run_instance sid={sid} model={agent.llm.config.model} max_steps={self.max_steps}"
+        )
+
         controller = AgentController(
             agent=agent,
             event_stream=event_stream,
@@ -251,6 +255,12 @@ class CodeActRunner:
         with finished_lock:
             status = finished["status"] or controller.get_agent_state().name.lower()
             result = finished["result"] or controller.state.last_error or ""
+            if not finished["status"] and status not in ("finished", "error", "rejected"):
+                status = "timeout"
+                if not result:
+                    result = "Agent wall-clock timeout"
+
+        oh_logger.info(f"[CodeActRunner] end run_instance sid={sid} status={status}")
 
         try:
             runtime.close()
