@@ -182,7 +182,10 @@ def process_instance(
             instance_id=instance_id,
             print_fct=logger.info,
         )
-        update_preds_file(output_dir / "preds.json", instance_id, model.config.model_name, result)
+        model_name_for_output = (
+            model.config.model_name if model is not None else config.get("model", {}).get("model", "unknown")
+        )
+        update_preds_file(output_dir / "preds.json", instance_id, model_name_for_output, result)
         progress_manager.on_instance_end(instance_id, exit_status)
 
 
