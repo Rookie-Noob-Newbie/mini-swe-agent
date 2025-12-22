@@ -290,6 +290,14 @@ class CodeActRunner:
 
             if isinstance(action, CmdRunAction):
                 obs = runtime.run(action)
+            elif isinstance(action, MessageAction):
+                # Non-tool assistant messages can happen if the model skips tool calls.
+                # Treat as a thought so the loop can continue.
+                msg = action.content or ""
+                obs = AgentThinkObservation(msg)
+                ms_logger.info(
+                    f"[CodeActRunner] iter={step_idx+1} sid={sid} MessageAction -> AgentThinkObservation"
+                )
             elif hasattr(action, "action") and getattr(action, "action", "") == "think":
                 obs = AgentThinkObservation(action.thought)
             else:
@@ -310,7 +318,12 @@ class CodeActRunner:
             step_rec = {
                 "iter": step_idx + 1,
                 "action_type": type(action).__name__,
-                "action": getattr(action, "command", None) or getattr(action, "thought", None) or getattr(action, "final_thought", None),
+                "action": (
+                    getattr(action, "command", None)
+                    or getattr(action, "thought", None)
+                    or getattr(action, "final_thought", None)
+                    or getattr(action, "content", None)
+                ),
                 "observation_type": type(obs).__name__,
                 "exit_code": getattr(obs, "exit_code", None),
                 "obs_len": len(getattr(obs, "content", "") or ""),

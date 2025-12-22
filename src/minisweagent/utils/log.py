@@ -32,11 +32,21 @@ def add_file_handler(
     handler.setLevel(level)
     formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
     handler.setFormatter(formatter)
+    handler._mswea_log_path = str(path)
     logger.addHandler(handler)
     if extra_loggers:
         for name in extra_loggers:
             ext_logger = logging.getLogger(name)
             ext_logger.addHandler(handler)
+    root_logger = logging.getLogger()
+    existing = any(
+        isinstance(h, logging.FileHandler) and getattr(h, "_mswea_log_path", None) == str(path)
+        for h in root_logger.handlers
+    )
+    if not existing:
+        root_logger.addHandler(handler)
+    if root_logger.level == logging.NOTSET or root_logger.level > level:
+        root_logger.setLevel(level)
     if print_path:
         print(f"Logging to '{path}'")
 
