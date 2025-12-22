@@ -4,6 +4,7 @@
 # Read this first: https://mini-swe-agent.com/latest/usage/swebench/  (usage docs)
 
 import concurrent.futures
+import copy
 import json
 import random
 import re
@@ -135,6 +136,8 @@ def process_instance(
     progress_manager: RunBatchProgressManager,
 ) -> None:
     """Process a single SWEBench instance."""
+    # work on a private copy so per-instance mutations (e.g., environment_class rewrite) don't leak across threads
+    config = copy.deepcopy(config)
     instance_id = instance["instance_id"]
     instance_dir = output_dir / instance_id
     instance_dir.mkdir(parents=True, exist_ok=True)
