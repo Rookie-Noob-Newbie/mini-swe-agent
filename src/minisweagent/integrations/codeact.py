@@ -294,6 +294,13 @@ class CodeActRunner:
             except Exception:
                 pass
 
+            # Ensure agent-produced actions are marked with source=agent so ConversationMemory keeps them
+            if getattr(action, "source", None) is None:
+                try:
+                    action.source = EventSource.AGENT
+                except Exception:
+                    action.source = "agent"
+
             if isinstance(action, AgentFinishAction):
                 exit_status = "finished"
                 result = ""
