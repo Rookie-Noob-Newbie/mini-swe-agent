@@ -13,6 +13,7 @@ import time
 import traceback
 from pathlib import Path
 
+import logging
 import typer
 import yaml
 from datasets import load_dataset
@@ -26,7 +27,7 @@ from minisweagent.environments import get_environment
 from minisweagent.models import get_model
 from minisweagent.run.extra.utils.batch_progress import RunBatchProgressManager
 from minisweagent.run.utils.save import save_traj
-from minisweagent.utils.log import add_file_handler, logger
+from minisweagent.utils.log import add_file_handler, logger, set_console_log_level
 from minisweagent.integrations.codeact import CodeActRunner
 
 _HELP_TEXT = """Run mini-SWE-agent on SWEBench instances.
@@ -247,7 +248,11 @@ def main(
     output_path = Path(output)
     output_path.mkdir(parents=True, exist_ok=True)
     logger.info(f"Results will be saved to {output_path}")
-    add_file_handler(output_path / "minisweagent.log")
+    add_file_handler(
+        output_path / "minisweagent.log",
+        extra_loggers=("openhands",),
+    )
+    set_console_log_level(logging.WARNING, "minisweagent", "openhands")
 
     dataset_path = DATASET_MAPPING.get(subset, subset)
     logger.info(f"Loading dataset {dataset_path}, split {split}...")
