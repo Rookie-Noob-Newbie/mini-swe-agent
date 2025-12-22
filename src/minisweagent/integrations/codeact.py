@@ -187,6 +187,8 @@ class CodeActRunner:
         llm_data = dict(self.llm_config)
         llm_data.setdefault("custom_llm_provider", "openai")
         llm_data.setdefault("timeout", 120)
+        # Force native tool calling when supported to preserve assistant/tool history
+        llm_data.setdefault("native_tool_calling", True)
         agent_cfg = AgentConfig(
             enable_browsing=False,
             enable_jupyter=False,
