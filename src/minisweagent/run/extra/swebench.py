@@ -222,6 +222,21 @@ def process_instance(
         )
         update_preds_file(output_dir / "preds.json", instance_id, model_name_for_output, result)
         progress_manager.on_instance_end(instance_id, exit_status)
+        # remove per-instance handlers so reused threads don't leak logs across instances
+        for h in per_instance_handlers:
+            for logger_name in ("minisweagent", "openhands"):
+                try:
+                    logging.getLogger(logger_name).removeHandler(h)
+                except Exception:
+                    pass
+            try:
+                logging.getLogger().removeHandler(h)
+            except Exception:
+                pass
+            try:
+                h.close()
+            except Exception:
+                pass
 
 
 def filter_instances(
