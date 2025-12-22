@@ -297,9 +297,16 @@ class CodeActRunner:
             # Ensure agent-produced actions are marked with source=agent so ConversationMemory keeps them
             if getattr(action, "source", None) is None:
                 try:
-                    action.source = EventSource.AGENT
+                    # Some actions expose _source instead of a writable property
+                    if hasattr(action, "_source"):
+                        setattr(action, "_source", EventSource.AGENT)
+                    else:
+                        setattr(action, "source", EventSource.AGENT)
                 except Exception:
-                    action.source = "agent"
+                    try:
+                        setattr(action, "_source", "agent")
+                    except Exception:
+                        pass
 
             if isinstance(action, AgentFinishAction):
                 exit_status = "finished"
