@@ -138,21 +138,50 @@ class CodeActRunner:
         self.run_id = run_id
 
     def _collect_patch(self) -> str:
-        """Collect working-tree diff from the task repo inside the container."""
+        """Collect working-tree diff from the task repo inside the container.
+
+        We stage all changes (including untracked files) to mirror the manual
+        `git add -A && git diff --cached` flow used by the CLI instructions and
+        then reset the index so we don't alter the working tree state.
+        """
+        repo_path = "/testbed"
         try:
-            resp = self.env.execute("git -C /testbed diff")
+            status = self.env.execute(f"git -C {repo_path} status --porcelain")
         except Exception as e:  # pragma: no cover
             ms_logger.error(f"[CodeActRunner] failed to collect patch: {e}")
             return ""
-        rc = resp.get("returncode", resp.get("exit_code", 0))
-        output = resp.get("output", "")
-        if rc != 0:
-            ms_logger.error(f"[CodeActRunner] git diff failed rc={rc}")
+        status_rc = status.get("returncode", status.get("exit_code", 0))
+        changes = status.get("output", "")
+        if status_rc != 0:
+            ms_logger.error(f"[CodeActRunner] git status failed rc={status_rc}")
             return ""
-        if output and output.strip():
-            ms_logger.info(f"[CodeActRunner] collected git diff patch ({len(output)} chars)")
-            return output
-        return ""
+        if not changes.strip():
+            ms_logger.info("[CodeActRunner] no git changes to collect")
+            return ""
+
+        try:
+            add_resp = self.env.execute(f"git -C {repo_path} add -A")
+            add_rc = add_resp.get("returncode", add_resp.get("exit_code", 0))
+            if add_rc != 0:
+                ms_logger.error(f"[CodeActRunner] git add failed rc={add_rc}")
+                return ""
+
+            diff_resp = self.env.execute(f"git -C {repo_path} diff --cached")
+            diff_rc = diff_resp.get("returncode", diff_resp.get("exit_code", 0))
+            patch = diff_resp.get("output", "")
+            if diff_rc != 0:
+                ms_logger.error(f"[CodeActRunner] git diff --cached failed rc={diff_rc}")
+                return ""
+            if patch and patch.strip():
+                ms_logger.info(f"[CodeActRunner] collected git diff patch ({len(patch)} chars)")
+                return patch
+            ms_logger.error("[CodeActRunner] staged changes detected but diff was empty")
+            return ""
+        finally:
+            try:
+                self.env.execute(f"git -C {repo_path} reset")
+            except Exception:
+                pass
 
     def _make_config(self) -> OpenHandsConfig:
         llm_data = dict(self.llm_config)
