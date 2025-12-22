@@ -183,8 +183,8 @@ class CodeActRunner:
             except Exception:
                 pass
 
-    def _make_config(self) -> OpenHandsConfig:
-        llm_data = dict(self.llm_config)
+    def _make_config(self, llm_data: dict[str, Any] | None = None) -> OpenHandsConfig:
+        llm_data = dict(llm_data or self.llm_config)
         llm_data.setdefault("custom_llm_provider", "openai")
         llm_data.setdefault("timeout", 120)
         # Force native tool calling when supported to preserve assistant/tool history
@@ -234,7 +234,15 @@ class CodeActRunner:
         iter_log_path = os.path.join(file_store_path, "runner.log")
         file_store = LocalFileStore(file_store_path)
 
-        config = self._make_config()
+        llm_data = dict(self.llm_config)
+        if llm_data.get("log_completions"):
+            llm_data["log_completions_folder"] = os.path.join(file_store_path, "llm_completions")
+            try:
+                os.makedirs(llm_data["log_completions_folder"], exist_ok=True)
+            except Exception:
+                pass
+
+        config = self._make_config(llm_data)
         llm_registry = LLMRegistry(config=config, agent_cls="agent")
         event_stream = EventStream(sid=sid, file_store=file_store, user_id=None)
         conversation_stats = ConversationStats(file_store, sid, None)
