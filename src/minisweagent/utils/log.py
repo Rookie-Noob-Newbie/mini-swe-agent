@@ -13,6 +13,7 @@ def _setup_root_logger() -> None:
         show_level=False,
         markup=True,
     )
+    _handler.setLevel(logging.WARNING)
     _formatter = logging.Formatter("%(name)s: %(levelname)s: %(message)s")
     _handler.setFormatter(_formatter)
     logger.addHandler(_handler)
