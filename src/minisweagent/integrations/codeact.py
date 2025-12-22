@@ -308,6 +308,10 @@ class CodeActRunner:
 
             if isinstance(action, CmdRunAction):
                 obs = runtime.run(action)
+                try:
+                    obs.tool_call_metadata = getattr(action, "tool_call_metadata", None)
+                except Exception:
+                    pass
             elif isinstance(action, MessageAction):
                 # Non-tool assistant messages can happen if the model skips tool calls.
                 # Treat as a thought so the loop can continue.
