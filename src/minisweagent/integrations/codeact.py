@@ -229,6 +229,7 @@ class CodeActRunner:
         os.makedirs(file_store_path, exist_ok=True)
         steps_path = os.path.join(file_store_path, "steps.jsonl")
         history_path = os.path.join(file_store_path, "history.jsonl")
+        iter_log_path = os.path.join(file_store_path, "runner.log")
         file_store = LocalFileStore(file_store_path)
 
         config = self._make_config()
@@ -260,11 +261,23 @@ class CodeActRunner:
         ms_logger.info(
             f"[CodeActRunner] start run_instance sid={sid} model={agent.llm.config.model} max_steps={self.max_steps}"
         )
+        try:
+            with open(iter_log_path, "a", encoding="utf-8") as f:
+                f.write(
+                    f"start sid={sid} model={agent.llm.config.model} max_steps={self.max_steps}\n"
+                )
+        except Exception:
+            pass
 
         exit_status = "timeout"
         result = ""
         for step_idx in range(self.max_steps):
             ms_logger.info(f"[CodeActRunner] iter={step_idx+1} sid={sid} calling agent.step")
+            try:
+                with open(iter_log_path, "a", encoding="utf-8") as f:
+                    f.write(f"iter={step_idx+1} calling agent.step\n")
+            except Exception:
+                pass
             try:
                 action = agent.step(state)
             except Exception as e:  # LLM or parsing failure
@@ -273,6 +286,11 @@ class CodeActRunner:
                 break
 
             ms_logger.info(f"[CodeActRunner] iter={step_idx+1} sid={sid} got action {type(action).__name__}")
+            try:
+                with open(iter_log_path, "a", encoding="utf-8") as f:
+                    f.write(f"iter={step_idx+1} action={type(action).__name__}\n")
+            except Exception:
+                pass
 
             if isinstance(action, AgentFinishAction):
                 exit_status = "finished"
@@ -298,6 +316,11 @@ class CodeActRunner:
                 ms_logger.info(
                     f"[CodeActRunner] iter={step_idx+1} sid={sid} MessageAction -> AgentThinkObservation"
                 )
+                try:
+                    with open(iter_log_path, "a", encoding="utf-8") as f:
+                        f.write(f"iter={step_idx+1} message_action_content={msg[:200]!r}\n")
+                except Exception:
+                    pass
             elif hasattr(action, "action") and getattr(action, "action", "") == "think":
                 obs = AgentThinkObservation(action.thought)
             else:
@@ -313,6 +336,13 @@ class CodeActRunner:
                 ms_logger.error(f"[CodeActRunner] iter={step_idx+1} sid={sid} obs Error: {obs.content}")
             else:
                 ms_logger.info(f"[CodeActRunner] iter={step_idx+1} sid={sid} obs {type(obs).__name__}")
+            try:
+                with open(iter_log_path, "a", encoding="utf-8") as f:
+                    f.write(
+                        f"iter={step_idx+1} obs={type(obs).__name__} exit={getattr(obs, 'exit_code', None)} len={len(getattr(obs, 'content', '') or '')}\n"
+                    )
+            except Exception:
+                pass
 
             # persist step
             step_rec = {
