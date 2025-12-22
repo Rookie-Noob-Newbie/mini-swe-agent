@@ -138,6 +138,7 @@ def process_instance(
     """Process a single SWEBench instance."""
     # work on a private copy so per-instance mutations (e.g., environment_class rewrite) don't leak across threads
     config = copy.deepcopy(config)
+    instance = copy.deepcopy(instance)
     instance_id = instance["instance_id"]
     instance_dir = output_dir / instance_id
     instance_dir.mkdir(parents=True, exist_ok=True)
@@ -151,6 +152,18 @@ def process_instance(
     progress_manager.on_instance_start(instance_id)
     progress_manager.update_instance_status(instance_id, "Pulling/starting docker")
 
+    # per-instance file log: only records emitted from this worker thread
+    per_instance_handlers: list[logging.Handler] = []
+    thread_ident = threading.get_ident()
+    handler = logging.FileHandler(instance_dir / "minisweagent.log")
+    handler.setLevel(logging.DEBUG)
+    handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+    handler.addFilter(lambda record, thread_ident=thread_ident: record.thread == thread_ident)
+    per_instance_handlers.append(handler)
+    for logger_name in ("minisweagent", "openhands"):
+        logging.getLogger(logger_name).addHandler(handler)
+    logging.getLogger().addHandler(handler)
+
     agent = None
     extra_info = None
 
@@ -163,7 +176,7 @@ def process_instance(
                 env=env,
                 llm_config=config.get("model", {}),
                 max_steps=config.get("agent", {}).get("max_steps", 100),
-                run_id=config.get("run", {}).get("run_id", None),
+                run_id=instance_id,
             )
             res = runner.run_instance(task)
             exit_status, result = res.exit_status, res.result
