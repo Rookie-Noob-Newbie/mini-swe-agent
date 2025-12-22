@@ -5,7 +5,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from minisweagent import Environment
 from minisweagent.utils.log import logger as ms_logger
@@ -225,7 +225,7 @@ class CodeActRunner:
         )
         return runtime
 
-    def run_instance(self, task: str) -> CodeActResult:
+    def run_instance(self, task: str, progress_callback: Callable[[str], None] | None = None) -> CodeActResult:
         sid = self.run_id or f"codeact-{uuid.uuid4().hex[:8]}"
         file_store_path = os.path.join(self.file_store_root, sid)
         os.makedirs(file_store_path, exist_ok=True)
@@ -268,9 +268,15 @@ class CodeActRunner:
         user_msg._source = EventSource.USER  # type: ignore[attr-defined]
         state.history.append(user_msg)
 
+        status_prefix = f"CodeAct sid={sid}"
         ms_logger.info(
             f"[CodeActRunner] start run_instance sid={sid} model={agent.llm.config.model} max_steps={self.max_steps}"
         )
+        if progress_callback:
+            try:
+                progress_callback("CodeAct: starting")
+            except Exception:
+                pass
         try:
             with open(iter_log_path, "a", encoding="utf-8") as f:
                 f.write(
@@ -283,6 +289,11 @@ class CodeActRunner:
         result = ""
         for step_idx in range(self.max_steps):
             ms_logger.info(f"[CodeActRunner] iter={step_idx+1} sid={sid} calling agent.step")
+            if progress_callback:
+                try:
+                    progress_callback(f"CodeAct iter {step_idx+1}")
+                except Exception:
+                    pass
             try:
                 with open(iter_log_path, "a", encoding="utf-8") as f:
                     f.write(f"iter={step_idx+1} calling agent.step\n")

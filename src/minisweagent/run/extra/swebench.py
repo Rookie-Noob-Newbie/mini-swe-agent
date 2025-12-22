@@ -178,7 +178,10 @@ def process_instance(
                 max_steps=config.get("agent", {}).get("max_steps", 100),
                 run_id=instance_id,
             )
-            res = runner.run_instance(task)
+            res = runner.run_instance(
+                task,
+                progress_callback=lambda msg, iid=instance_id: progress_manager.update_instance_status(iid, msg),
+            )
             exit_status, result = res.exit_status, res.result
             progress_manager.update_instance_status(instance_id, f"CodeAct: {exit_status}")
             # copy steps log to instance dir for inspection
