@@ -252,7 +252,15 @@ def main(
         output_path / "minisweagent.log",
         extra_loggers=("openhands",),
     )
-    set_console_log_level(logging.WARNING, "minisweagent", "openhands")
+    set_console_log_level(
+        logging.WARNING,
+        "root",
+        "minisweagent",
+        "openhands",
+        "httpcore",
+        "httpx",
+        "asyncio",
+    )
 
     dataset_path = DATASET_MAPPING.get(subset, subset)
     logger.info(f"Loading dataset {dataset_path}, split {split}...")

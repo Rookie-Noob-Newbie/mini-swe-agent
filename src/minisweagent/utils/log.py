@@ -57,9 +57,9 @@ logger = logging.getLogger("minisweagent")
 
 def set_console_log_level(level: int, *logger_names: str) -> None:
     for name in logger_names:
-        target = logging.getLogger(name)
+        target = logging.getLogger() if name in ("", "root") else logging.getLogger(name)
         for handler in target.handlers:
-            if isinstance(handler, logging.StreamHandler):
+            if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
                 handler.setLevel(level)
 
 
