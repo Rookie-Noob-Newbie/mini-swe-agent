@@ -5,7 +5,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from minisweagent import Environment
 from minisweagent.utils.log import logger as ms_logger
@@ -138,26 +138,57 @@ class CodeActRunner:
         self.run_id = run_id
 
     def _collect_patch(self) -> str:
-        """Collect working-tree diff from the task repo inside the container."""
+        """Collect working-tree diff from the task repo inside the container.
+
+        We stage all changes (including untracked files) to mirror the manual
+        `git add -A && git diff --cached` flow used by the CLI instructions and
+        then reset the index so we don't alter the working tree state.
+        """
+        repo_path = "/testbed"
         try:
-            resp = self.env.execute("git -C /testbed diff")
+            status = self.env.execute(f"git -C {repo_path} status --porcelain")
         except Exception as e:  # pragma: no cover
             ms_logger.error(f"[CodeActRunner] failed to collect patch: {e}")
             return ""
-        rc = resp.get("returncode", resp.get("exit_code", 0))
-        output = resp.get("output", "")
-        if rc != 0:
-            ms_logger.error(f"[CodeActRunner] git diff failed rc={rc}")
+        status_rc = status.get("returncode", status.get("exit_code", 0))
+        changes = status.get("output", "")
+        if status_rc != 0:
+            ms_logger.error(f"[CodeActRunner] git status failed rc={status_rc}")
             return ""
-        if output and output.strip():
-            ms_logger.info(f"[CodeActRunner] collected git diff patch ({len(output)} chars)")
-            return output
-        return ""
+        if not changes.strip():
+            ms_logger.info("[CodeActRunner] no git changes to collect")
+            return ""
 
-    def _make_config(self) -> OpenHandsConfig:
-        llm_data = dict(self.llm_config)
+        try:
+            add_resp = self.env.execute(f"git -C {repo_path} add -A")
+            add_rc = add_resp.get("returncode", add_resp.get("exit_code", 0))
+            if add_rc != 0:
+                ms_logger.error(f"[CodeActRunner] git add failed rc={add_rc}")
+                return ""
+
+            diff_resp = self.env.execute(f"git -C {repo_path} diff --cached")
+            diff_rc = diff_resp.get("returncode", diff_resp.get("exit_code", 0))
+            patch = diff_resp.get("output", "")
+            if diff_rc != 0:
+                ms_logger.error(f"[CodeActRunner] git diff --cached failed rc={diff_rc}")
+                return ""
+            if patch and patch.strip():
+                ms_logger.info(f"[CodeActRunner] collected git diff patch ({len(patch)} chars)")
+                return patch
+            ms_logger.error("[CodeActRunner] staged changes detected but diff was empty")
+            return ""
+        finally:
+            try:
+                self.env.execute(f"git -C {repo_path} reset")
+            except Exception:
+                pass
+
+    def _make_config(self, llm_data: dict[str, Any] | None = None) -> OpenHandsConfig:
+        llm_data = dict(llm_data or self.llm_config)
         llm_data.setdefault("custom_llm_provider", "openai")
         llm_data.setdefault("timeout", 120)
+        # Force native tool calling when supported to preserve assistant/tool history
+        llm_data.setdefault("native_tool_calling", True)
         agent_cfg = AgentConfig(
             enable_browsing=False,
             enable_jupyter=False,
@@ -194,15 +225,24 @@ class CodeActRunner:
         )
         return runtime
 
-    def run_instance(self, task: str) -> CodeActResult:
+    def run_instance(self, task: str, progress_callback: Callable[[str], None] | None = None) -> CodeActResult:
         sid = self.run_id or f"codeact-{uuid.uuid4().hex[:8]}"
         file_store_path = os.path.join(self.file_store_root, sid)
         os.makedirs(file_store_path, exist_ok=True)
         steps_path = os.path.join(file_store_path, "steps.jsonl")
         history_path = os.path.join(file_store_path, "history.jsonl")
+        iter_log_path = os.path.join(file_store_path, "runner.log")
         file_store = LocalFileStore(file_store_path)
 
-        config = self._make_config()
+        llm_data = dict(self.llm_config)
+        if llm_data.get("log_completions"):
+            llm_data["log_completions_folder"] = os.path.join(file_store_path, "llm_completions")
+            try:
+                os.makedirs(llm_data["log_completions_folder"], exist_ok=True)
+            except Exception:
+                pass
+
+        config = self._make_config(llm_data)
         llm_registry = LLMRegistry(config=config, agent_cls="agent")
         event_stream = EventStream(sid=sid, file_store=file_store, user_id=None)
         conversation_stats = ConversationStats(file_store, sid, None)
@@ -228,14 +268,37 @@ class CodeActRunner:
         user_msg._source = EventSource.USER  # type: ignore[attr-defined]
         state.history.append(user_msg)
 
+        status_prefix = f"CodeAct sid={sid}"
         ms_logger.info(
             f"[CodeActRunner] start run_instance sid={sid} model={agent.llm.config.model} max_steps={self.max_steps}"
         )
+        if progress_callback:
+            try:
+                progress_callback("CodeAct: starting")
+            except Exception:
+                pass
+        try:
+            with open(iter_log_path, "a", encoding="utf-8") as f:
+                f.write(
+                    f"start sid={sid} model={agent.llm.config.model} max_steps={self.max_steps}\n"
+                )
+        except Exception:
+            pass
 
         exit_status = "timeout"
         result = ""
         for step_idx in range(self.max_steps):
             ms_logger.info(f"[CodeActRunner] iter={step_idx+1} sid={sid} calling agent.step")
+            if progress_callback:
+                try:
+                    progress_callback(f"CodeAct iter {step_idx+1}")
+                except Exception:
+                    pass
+            try:
+                with open(iter_log_path, "a", encoding="utf-8") as f:
+                    f.write(f"iter={step_idx+1} calling agent.step\n")
+            except Exception:
+                pass
             try:
                 action = agent.step(state)
             except Exception as e:  # LLM or parsing failure
@@ -244,6 +307,25 @@ class CodeActRunner:
                 break
 
             ms_logger.info(f"[CodeActRunner] iter={step_idx+1} sid={sid} got action {type(action).__name__}")
+            try:
+                with open(iter_log_path, "a", encoding="utf-8") as f:
+                    f.write(f"iter={step_idx+1} action={type(action).__name__}\n")
+            except Exception:
+                pass
+
+            # Ensure agent-produced actions are marked with source=agent so ConversationMemory keeps them
+            if getattr(action, "source", None) is None:
+                try:
+                    # Some actions expose _source instead of a writable property
+                    if hasattr(action, "_source"):
+                        setattr(action, "_source", EventSource.AGENT)
+                    else:
+                        setattr(action, "source", EventSource.AGENT)
+                except Exception:
+                    try:
+                        setattr(action, "_source", "agent")
+                    except Exception:
+                        pass
 
             if isinstance(action, AgentFinishAction):
                 exit_status = "finished"
@@ -261,6 +343,23 @@ class CodeActRunner:
 
             if isinstance(action, CmdRunAction):
                 obs = runtime.run(action)
+                try:
+                    obs.tool_call_metadata = getattr(action, "tool_call_metadata", None)
+                except Exception:
+                    pass
+            elif isinstance(action, MessageAction):
+                # Non-tool assistant messages can happen if the model skips tool calls.
+                # Treat as a thought so the loop can continue.
+                msg = action.content or ""
+                obs = AgentThinkObservation(msg)
+                ms_logger.info(
+                    f"[CodeActRunner] iter={step_idx+1} sid={sid} MessageAction -> AgentThinkObservation"
+                )
+                try:
+                    with open(iter_log_path, "a", encoding="utf-8") as f:
+                        f.write(f"iter={step_idx+1} message_action_content={msg[:200]!r}\n")
+                except Exception:
+                    pass
             elif hasattr(action, "action") and getattr(action, "action", "") == "think":
                 obs = AgentThinkObservation(action.thought)
             else:
@@ -276,12 +375,24 @@ class CodeActRunner:
                 ms_logger.error(f"[CodeActRunner] iter={step_idx+1} sid={sid} obs Error: {obs.content}")
             else:
                 ms_logger.info(f"[CodeActRunner] iter={step_idx+1} sid={sid} obs {type(obs).__name__}")
+            try:
+                with open(iter_log_path, "a", encoding="utf-8") as f:
+                    f.write(
+                        f"iter={step_idx+1} obs={type(obs).__name__} exit={getattr(obs, 'exit_code', None)} len={len(getattr(obs, 'content', '') or '')}\n"
+                    )
+            except Exception:
+                pass
 
             # persist step
             step_rec = {
                 "iter": step_idx + 1,
                 "action_type": type(action).__name__,
-                "action": getattr(action, "command", None) or getattr(action, "thought", None) or getattr(action, "final_thought", None),
+                "action": (
+                    getattr(action, "command", None)
+                    or getattr(action, "thought", None)
+                    or getattr(action, "final_thought", None)
+                    or getattr(action, "content", None)
+                ),
                 "observation_type": type(obs).__name__,
                 "exit_code": getattr(obs, "exit_code", None),
                 "obs_len": len(getattr(obs, "content", "") or ""),

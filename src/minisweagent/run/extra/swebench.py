@@ -4,6 +4,7 @@
 # Read this first: https://mini-swe-agent.com/latest/usage/swebench/  (usage docs)
 
 import concurrent.futures
+import copy
 import json
 import random
 import re
@@ -13,6 +14,7 @@ import time
 import traceback
 from pathlib import Path
 
+import logging
 import typer
 import yaml
 from datasets import load_dataset
@@ -26,7 +28,7 @@ from minisweagent.environments import get_environment
 from minisweagent.models import get_model
 from minisweagent.run.extra.utils.batch_progress import RunBatchProgressManager
 from minisweagent.run.utils.save import save_traj
-from minisweagent.utils.log import add_file_handler, logger
+from minisweagent.utils.log import add_file_handler, logger, set_console_log_level
 from minisweagent.integrations.codeact import CodeActRunner
 
 _HELP_TEXT = """Run mini-SWE-agent on SWEBench instances.
@@ -134,6 +136,9 @@ def process_instance(
     progress_manager: RunBatchProgressManager,
 ) -> None:
     """Process a single SWEBench instance."""
+    # work on a private copy so per-instance mutations (e.g., environment_class rewrite) don't leak across threads
+    config = copy.deepcopy(config)
+    instance = copy.deepcopy(instance)
     instance_id = instance["instance_id"]
     instance_dir = output_dir / instance_id
     instance_dir.mkdir(parents=True, exist_ok=True)
@@ -147,6 +152,18 @@ def process_instance(
     progress_manager.on_instance_start(instance_id)
     progress_manager.update_instance_status(instance_id, "Pulling/starting docker")
 
+    # per-instance file log: only records emitted from this worker thread
+    per_instance_handlers: list[logging.Handler] = []
+    thread_ident = threading.get_ident()
+    handler = logging.FileHandler(instance_dir / "minisweagent.log")
+    handler.setLevel(logging.DEBUG)
+    handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+    handler.addFilter(lambda record, thread_ident=thread_ident: record.thread == thread_ident)
+    per_instance_handlers.append(handler)
+    for logger_name in ("minisweagent", "openhands"):
+        logging.getLogger(logger_name).addHandler(handler)
+    logging.getLogger().addHandler(handler)
+
     agent = None
     extra_info = None
 
@@ -159,9 +176,12 @@ def process_instance(
                 env=env,
                 llm_config=config.get("model", {}),
                 max_steps=config.get("agent", {}).get("max_steps", 100),
-                run_id=config.get("run", {}).get("run_id", None),
+                run_id=instance_id,
             )
-            res = runner.run_instance(task)
+            res = runner.run_instance(
+                task,
+                progress_callback=lambda msg, iid=instance_id: progress_manager.update_instance_status(iid, msg),
+            )
             exit_status, result = res.exit_status, res.result
             progress_manager.update_instance_status(instance_id, f"CodeAct: {exit_status}")
             # copy steps log to instance dir for inspection
@@ -205,6 +225,21 @@ def process_instance(
         )
         update_preds_file(output_dir / "preds.json", instance_id, model_name_for_output, result)
         progress_manager.on_instance_end(instance_id, exit_status)
+        # remove per-instance handlers so reused threads don't leak logs across instances
+        for h in per_instance_handlers:
+            for logger_name in ("minisweagent", "openhands"):
+                try:
+                    logging.getLogger(logger_name).removeHandler(h)
+                except Exception:
+                    pass
+            try:
+                logging.getLogger().removeHandler(h)
+            except Exception:
+                pass
+            try:
+                h.close()
+            except Exception:
+                pass
 
 
 def filter_instances(
@@ -247,7 +282,19 @@ def main(
     output_path = Path(output)
     output_path.mkdir(parents=True, exist_ok=True)
     logger.info(f"Results will be saved to {output_path}")
-    add_file_handler(output_path / "minisweagent.log")
+    add_file_handler(
+        output_path / "minisweagent.log",
+        extra_loggers=("openhands",),
+    )
+    set_console_log_level(
+        logging.WARNING,
+        "root",
+        "minisweagent",
+        "openhands",
+        "httpcore",
+        "httpx",
+        "asyncio",
+    )
 
     dataset_path = DATASET_MAPPING.get(subset, subset)
     logger.info(f"Loading dataset {dataset_path}, split {split}...")

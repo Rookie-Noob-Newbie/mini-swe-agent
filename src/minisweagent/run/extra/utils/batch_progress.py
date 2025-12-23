@@ -131,6 +131,7 @@ class RunBatchProgressManager:
                 status=_shorten_str(message, 30),
                 instance_id=_shorten_str(instance_id, 25, shorten_left=True),
             )
+            self._task_progress_bar.refresh()
         self._update_total_costs()
 
     def on_instance_start(self, instance_id: str):
@@ -141,6 +142,7 @@ class RunBatchProgressManager:
                 total=None,
                 instance_id=instance_id,
             )
+            self._task_progress_bar.refresh()
 
     def on_instance_end(self, instance_id: str, exit_status: str | None) -> None:
         self._instances_by_exit_status[exit_status].append(instance_id)
@@ -150,6 +152,7 @@ class RunBatchProgressManager:
             except KeyError:
                 pass
             self._main_progress_bar.update(TaskID(0), advance=1, eta=self._get_eta_text())
+            self._task_progress_bar.refresh()
         self.update_exit_status_table()
         self._update_total_costs()
         if self._yaml_report_path is not None:

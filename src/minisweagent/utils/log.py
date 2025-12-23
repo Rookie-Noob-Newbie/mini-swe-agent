@@ -13,18 +13,40 @@ def _setup_root_logger() -> None:
         show_level=False,
         markup=True,
     )
+    _handler.setLevel(logging.WARNING)
     _formatter = logging.Formatter("%(name)s: %(levelname)s: %(message)s")
     _handler.setFormatter(_formatter)
     logger.addHandler(_handler)
+    logger.propagate = False
 
 
-def add_file_handler(path: Path | str, level: int = logging.DEBUG, *, print_path: bool = True) -> None:
+def add_file_handler(
+    path: Path | str,
+    level: int = logging.DEBUG,
+    *,
+    print_path: bool = True,
+    extra_loggers: tuple[str, ...] | None = None,
+) -> None:
     logger = logging.getLogger("minisweagent")
     handler = logging.FileHandler(path)
     handler.setLevel(level)
     formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
     handler.setFormatter(formatter)
+    handler._mswea_log_path = str(path)
     logger.addHandler(handler)
+    if extra_loggers:
+        for name in extra_loggers:
+            ext_logger = logging.getLogger(name)
+            ext_logger.addHandler(handler)
+    root_logger = logging.getLogger()
+    existing = any(
+        isinstance(h, logging.FileHandler) and getattr(h, "_mswea_log_path", None) == str(path)
+        for h in root_logger.handlers
+    )
+    if not existing:
+        root_logger.addHandler(handler)
+    if root_logger.level == logging.NOTSET or root_logger.level > level:
+        root_logger.setLevel(level)
     if print_path:
         print(f"Logging to '{path}'")
 
@@ -33,4 +55,12 @@ _setup_root_logger()
 logger = logging.getLogger("minisweagent")
 
 
-__all__ = ["logger"]
+def set_console_log_level(level: int, *logger_names: str) -> None:
+    for name in logger_names:
+        target = logging.getLogger() if name in ("", "root") else logging.getLogger(name)
+        for handler in target.handlers:
+            if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
+                handler.setLevel(level)
+
+
+__all__ = ["logger", "add_file_handler", "set_console_log_level"]
