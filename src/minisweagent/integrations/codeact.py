@@ -45,6 +45,7 @@ from openhands.events.observation import (
     FileWriteObservation,
     Observation,
 )
+from openhands.events.serialization.event import event_to_dict
 from openhands.llm.llm_registry import LLMRegistry
 from openhands.runtime.base import Runtime
 from openhands.runtime.runtime_status import RuntimeStatus
@@ -422,15 +423,56 @@ class CodeActRunner:
                 pass
 
             # persist step
-            step_rec = {
-                "iter": step_idx + 1,
-                "action_type": type(action).__name__,
-                "action": (
+            action_summary = None
+            if isinstance(action, CmdRunAction):
+                action_summary = action.command
+            elif isinstance(action, FileReadAction):
+                action_summary = action.path
+            elif isinstance(action, FileWriteAction):
+                action_summary = action.path
+            elif isinstance(action, FileEditAction):
+                action_summary = f"{action.command} {action.path}".strip() or action.path
+            elif isinstance(action, IPythonRunCellAction):
+                action_summary = action.code
+            elif isinstance(action, BrowseURLAction):
+                action_summary = action.url
+            elif isinstance(action, BrowseInteractiveAction):
+                action_summary = action.browser_actions
+            elif isinstance(action, MCPAction):
+                action_summary = f"{action.name} {action.arguments}"
+            elif isinstance(action, AgentFinishAction):
+                action_summary = (
+                    getattr(action, "final_thought", None)
+                    or getattr(action, "thought", None)
+                    or (action.outputs or {}).get("content")
+                )
+            elif isinstance(action, AgentThinkAction):
+                action_summary = action.thought
+            elif isinstance(action, TaskTrackingAction):
+                action_summary = action.command
+            elif isinstance(action, MessageAction):
+                action_summary = action.content
+            else:
+                action_summary = (
                     getattr(action, "command", None)
                     or getattr(action, "thought", None)
                     or getattr(action, "final_thought", None)
                     or getattr(action, "content", None)
-                ),
+                )
+
+            try:
+                action_payload = event_to_dict(action)
+                action_args = action_payload.get("args")
+            except Exception:
+                action_args = None
+
+            step_rec = {
+                "iter": step_idx + 1,
+                "action_type": type(action).__name__,
+                "action": action_summary,
+                "action_message": getattr(action, "message", None),
+                "action_thought": getattr(action, "thought", None),
+                "action_args": action_args,
                 "observation_type": type(obs).__name__,
                 "exit_code": getattr(obs, "exit_code", None),
                 "obs_len": len(getattr(obs, "content", "") or ""),
@@ -464,14 +506,18 @@ class CodeActRunner:
         try:
             with open(history_path, "w", encoding="utf-8") as f:
                 for ev in state.history:
-                    rec = {
-                        "type": type(ev).__name__,
-                        "source": getattr(ev, "source", None),
-                        "content": getattr(ev, "content", None),
-                        "command": getattr(ev, "command", None),
-                        "thought": getattr(ev, "thought", None),
-                        "outputs": getattr(ev, "outputs", None),
-                    }
+                    try:
+                        rec = event_to_dict(ev)
+                    except Exception:
+                        rec = {
+                            "type": type(ev).__name__,
+                            "source": getattr(ev, "source", None),
+                            "content": getattr(ev, "content", None),
+                            "command": getattr(ev, "command", None),
+                            "thought": getattr(ev, "thought", None),
+                            "outputs": getattr(ev, "outputs", None),
+                            "path": getattr(ev, "path", None),
+                        }
                     f.write(json.dumps(rec, ensure_ascii=False) + "\n")
         except Exception as e:
             ms_logger.error(f"[CodeActRunner] failed to write history log: {e}")
