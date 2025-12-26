@@ -23,7 +23,7 @@ from openhands.core.schema import AgentState
 from openhands.events import EventSource, EventStream, EventStreamSubscriber
 from openhands.events.action import MessageAction, TaskTrackingAction
 from openhands.events.action.commands import CmdRunAction
-from openhands.events.action.agent import AgentFinishAction
+from openhands.events.action.agent import AgentFinishAction, AgentThinkAction
 from openhands.events.observation import (
     AgentThinkObservation,
     CmdOutputObservation,
@@ -348,6 +348,12 @@ class CodeActRunner:
                     obs.tool_call_metadata = getattr(action, "tool_call_metadata", None)
                 except Exception:
                     pass
+            elif isinstance(action, AgentThinkAction):
+                obs = runtime.run_action(action)
+                try:
+                    obs.tool_call_metadata = getattr(action, "tool_call_metadata", None)
+                except Exception:
+                    pass
             elif isinstance(action, TaskTrackingAction):
                 obs = runtime.run_action(action)
                 try:
@@ -368,7 +374,11 @@ class CodeActRunner:
                 except Exception:
                     pass
             elif hasattr(action, "action") and getattr(action, "action", "") == "think":
-                obs = AgentThinkObservation(action.thought)
+                obs = AgentThinkObservation("Your thought has been logged.")
+                try:
+                    obs.tool_call_metadata = getattr(action, "tool_call_metadata", None)
+                except Exception:
+                    pass
             else:
                 obs = ErrorObservation(f"Action type {type(action).__name__} not supported in CodeActRunner")
 
