@@ -13,12 +13,7 @@ from minisweagent.utils.log import logger as ms_logger
 
 from openhands.agenthub.codeact_agent.codeact_agent import CodeActAgent
 from openhands.controller.state.state import State
-from openhands.core.config import (
-    AgentConfig,
-    MCPConfig,
-    OpenHandsConfig,
-    SandboxConfig,
-)
+from openhands.core.config import AgentConfig, OpenHandsConfig, SandboxConfig
 from openhands.core.config.llm_config import LLMConfig
 from openhands.core.exceptions import (
     FunctionCallNotExistsError,
@@ -129,7 +124,15 @@ class CodeActRunner:
         llm_data.setdefault("timeout", 120)
         # Force native tool calling when supported to preserve assistant/tool history
         llm_data.setdefault("native_tool_calling", True)
-        agent_cfg = AgentConfig()
+        agent_cfg = AgentConfig(
+            enable_jupyter=False,
+            enable_browsing=os.environ.get("RUN_WITH_BROWSING", "false").lower()
+            == "true",
+            enable_llm_editor=False,
+            enable_mcp=False,
+            enable_prompt_extensions=False,
+            enable_plan_mode=False,
+        )
         agent_cfg.model_post_init(None)
         cfg = OpenHandsConfig(
             llms={"llm": LLMConfig(**llm_data)},
