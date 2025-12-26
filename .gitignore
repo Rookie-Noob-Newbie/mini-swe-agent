@@ -2,8 +2,24 @@ patch.txt
 exit_statuses*.yaml
 preds.json
 *.traj.json
+
+# Run artifacts
+tmp/
+codeact_mswea_store/
+*_run_*/
+*-run_*/
+GLM-*.json
+openai__*.json
 .env
 traj.json
+
+# Run artifacts
+tmp/
+codeact_mswea_store/
+*_run_*/
+*-run_*/
+GLM-*.json
+openai__*.json
 
 # Created by https://www.toptal.com/developers/gitignore/api/python
 # Edit at https://www.toptal.com/developers/gitignore?templates=python

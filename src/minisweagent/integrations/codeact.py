@@ -21,7 +21,7 @@ from openhands.core.config import (
 from openhands.core.config.llm_config import LLMConfig
 from openhands.core.schema import AgentState
 from openhands.events import EventSource, EventStream, EventStreamSubscriber
-from openhands.events.action import MessageAction
+from openhands.events.action import MessageAction, TaskTrackingAction
 from openhands.events.action.commands import CmdRunAction
 from openhands.events.action.agent import AgentFinishAction
 from openhands.events.observation import (
@@ -194,8 +194,9 @@ class CodeActRunner:
             enable_jupyter=False,
             enable_editor=False,
             enable_llm_editor=False,
-            enable_plan_mode=False,
+            enable_plan_mode=True,
             enable_condensation_request=False,
+            enable_prompt_extensions=False,
             enable_mcp=False,
             runtime="cli",
         )
@@ -343,6 +344,12 @@ class CodeActRunner:
 
             if isinstance(action, CmdRunAction):
                 obs = runtime.run(action)
+                try:
+                    obs.tool_call_metadata = getattr(action, "tool_call_metadata", None)
+                except Exception:
+                    pass
+            elif isinstance(action, TaskTrackingAction):
+                obs = runtime.run_action(action)
                 try:
                     obs.tool_call_metadata = getattr(action, "tool_call_metadata", None)
                 except Exception:

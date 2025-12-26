@@ -13,6 +13,7 @@ from minisweagent.config import builtin_config_dir, get_config_path
 from minisweagent.models import get_model
 from minisweagent.run.extra.swebench import (
     DATASET_MAPPING,
+    build_openhands_swebench_instruction,
     get_sb_environment,
 )
 from minisweagent.run.utils.save import save_traj
@@ -66,7 +67,8 @@ def main(
 
     exit_status, result, extra_info = None, None, None
     try:
-        exit_status, result = agent.run(instance["problem_statement"])  # type: ignore[arg-type]
+        task = build_openhands_swebench_instruction(instance)
+        exit_status, result = agent.run(task)  # type: ignore[arg-type]
     except Exception as e:
         logger.error(f"Error processing instance {instance_spec}: {e}", exc_info=True)
         exit_status, result = type(e).__name__, str(e)
