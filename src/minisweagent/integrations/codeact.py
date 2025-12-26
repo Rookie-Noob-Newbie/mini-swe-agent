@@ -19,6 +19,13 @@ from openhands.core.config import (
     SandboxConfig,
 )
 from openhands.core.config.llm_config import LLMConfig
+from openhands.core.exceptions import (
+    FunctionCallNotExistsError,
+    FunctionCallValidationError,
+    LLMMalformedActionError,
+    LLMNoActionError,
+    LLMResponseError,
+)
 from openhands.core.schema import AgentState
 from openhands.events import EventSource, EventStream, EventStreamSubscriber
 from openhands.events.action import MessageAction, TaskTrackingAction
@@ -302,6 +309,39 @@ class CodeActRunner:
                 pass
             try:
                 action = agent.step(state)
+            except (
+                LLMMalformedActionError,
+                LLMNoActionError,
+                LLMResponseError,
+                FunctionCallValidationError,
+                FunctionCallNotExistsError,
+            ) as e:
+                obs = ErrorObservation(content=str(e))
+                obs._source = EventSource.AGENT  # type: ignore[attr-defined]
+                state.history.append(obs)
+                ms_logger.error(
+                    f"[CodeActRunner] iter={step_idx+1} sid={sid} agent.step tool error: {e}"
+                )
+                try:
+                    with open(iter_log_path, "a", encoding="utf-8") as f:
+                        f.write(f"iter={step_idx+1} agent_step_tool_error={e!r}\n")
+                except Exception:
+                    pass
+                step_rec = {
+                    "iter": step_idx + 1,
+                    "action_type": "AgentStepError",
+                    "action": str(e),
+                    "observation_type": type(obs).__name__,
+                    "exit_code": None,
+                    "obs_len": len(obs.content or ""),
+                }
+                try:
+                    with open(steps_path, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(step_rec, ensure_ascii=False) + "\n")
+                except Exception as e:
+                    ms_logger.error(f"[CodeActRunner] failed to write steps log: {e}")
+                state.iteration_flag.current_value += 1
+                continue
             except Exception as e:  # LLM or parsing failure
                 exit_status = "error"
                 result = f"Agent step failed: {e}"
