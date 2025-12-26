@@ -64,19 +64,22 @@ class OpenHandsCompatRuntime(Runtime):
 
     def _resolve_path(self, path: str) -> str:
         if path.startswith("/workspace"):
-            mapped = "/testbed" + path[len("/workspace") :]
+            mapped = path
         elif path.startswith("/testbed"):
             mapped = path
         elif path.startswith("/"):
             mapped = path
         else:
-            mapped = f"/testbed/{path.lstrip('./')}"
+            base = "/workspace"
+            if not self._path_exists(base) and self._path_exists("/testbed"):
+                base = "/testbed"
+            mapped = f"{base}/{path.lstrip('./')}"
         normalized = posixpath.normpath(mapped)
-        if normalized == "/testbed":
+        if normalized in {"/workspace", "/testbed"}:
             return normalized
-        if not normalized.startswith("/testbed/"):
-            raise ValueError("path is outside the workspace")
-        return normalized
+        if normalized.startswith("/workspace/") or normalized.startswith("/testbed/"):
+            return normalized
+        raise ValueError("path is outside the workspace")
 
     def _run_python(self, script: str, env_vars: dict[str, str]) -> dict[str, Any]:
         env_prefix = " ".join(

@@ -73,12 +73,14 @@ class CodeActRunner:
         max_steps: int = 100,
         file_store_root: str | None = None,
         run_id: str | None = None,
+        repo_path: str | None = None,
     ):
         self.env = env
         self.llm_config = llm_config or {}
         self.max_steps = max_steps
         self.file_store_root = file_store_root or str(get_repo_tmp() / "codeact_mswea_store")
         self.run_id = run_id
+        self.repo_path = repo_path or "/testbed"
 
     def _collect_patch(self) -> str:
         """Collect working-tree diff from the task repo inside the container.
@@ -87,7 +89,7 @@ class CodeActRunner:
         `git add -A && git diff --cached` flow used by the CLI instructions and
         then reset the index so we don't alter the working tree state.
         """
-        repo_path = "/testbed"
+        repo_path = self.repo_path
         try:
             status = self.env.execute(f"git -C {repo_path} status --porcelain")
         except Exception as e:  # pragma: no cover

@@ -142,6 +142,21 @@ def build_openhands_swebench_instruction(instance: dict) -> str:
     return instruction
 
 
+def setup_openhands_workspace(env: Environment, instance: dict) -> str:
+    workspace_dir_name = _get_swebench_workspace_dir_name(instance)
+    cmd = (
+        "mkdir -p /workspace && "
+        "rm -rf /workspace/* && "
+        f"cp -r /testbed /workspace/{workspace_dir_name}"
+    )
+    out = env.execute(cmd)
+    if out.get("returncode", 0) != 0:
+        raise RuntimeError(f"Failed to prepare /workspace: {out}")
+    if hasattr(env, "config") and hasattr(env.config, "cwd"):
+        env.config.cwd = f"/workspace/{workspace_dir_name}"
+    return workspace_dir_name
+
+
 class ProgressTrackingAgent(DefaultAgent):
     """Simple wrapper around DefaultAgent that provides progress updates."""
 
@@ -257,6 +272,7 @@ def process_instance(
 
     try:
         env = get_sb_environment(config, instance)
+        workspace_dir_name = setup_openhands_workspace(env, instance)
         if use_codeact:
             progress_manager.update_instance_status(instance_id, "CodeAct: starting")
             logger.info(f"[CodeAct] Starting instance {instance_id}")
@@ -265,6 +281,7 @@ def process_instance(
                 llm_config=config.get("model", {}),
                 max_steps=config.get("agent", {}).get("max_steps", 100),
                 run_id=instance_id,
+                repo_path=f"/workspace/{workspace_dir_name}",
             )
             res = runner.run_instance(
                 task,
