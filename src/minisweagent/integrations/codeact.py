@@ -54,6 +54,14 @@ from openhands.storage.local import LocalFileStore
 from minisweagent.utils.paths import get_repo_tmp
 
 
+@dataclass
+class CodeActResult:
+    exit_status: str
+    result: str
+    steps_path: str
+    history_path: str
+
+
 class CodeActRunner:
     """Runs CodeActAgent decisions while executing commands via mini-swe-agent Environment."""
 
