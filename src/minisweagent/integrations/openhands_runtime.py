@@ -140,7 +140,8 @@ except Exception as e:
         return raw.decode("utf-8", errors="replace"), None
 
     def _write_file_text(self, path: str, content: str) -> str | None:
-        payload = base64.b64encode(content.encode("utf-8")).decode("ascii")
+        payload_bytes = content.encode("utf-8")
+        payload = base64.b64encode(payload_bytes).decode("ascii")
         script = """import base64, json, os
 path = os.environ["MSWEA_PATH"]
 payload = base64.b64decode(os.environ["MSWEA_CONTENT_B64"])
@@ -154,12 +155,43 @@ try:
 except Exception as e:
     print(json.dumps({"ok": False, "error": str(e)}))
 """
-        data = self._run_python_json(
-            script,
-            {"MSWEA_PATH": path, "MSWEA_CONTENT_B64": payload},
-        )
-        if not data.get("ok"):
-            return data.get("error", "file write failed")
+        max_payload = 60000
+        if len(payload) <= max_payload:
+            data = self._run_python_json(
+                script,
+                {"MSWEA_PATH": path, "MSWEA_CONTENT_B64": payload},
+            )
+            if not data.get("ok"):
+                return data.get("error", "file write failed")
+            return None
+
+        chunk_script = """import base64, os
+path = os.environ["MSWEA_PATH"]
+payload = base64.b64decode(os.environ["MSWEA_CONTENT_B64"])
+parent = os.path.dirname(path)
+if parent:
+    os.makedirs(parent, exist_ok=True)
+mode = "ab" if os.environ.get("MSWEA_APPEND") == "1" else "wb"
+with open(path, mode) as f:
+    f.write(payload)
+"""
+        chunk_size = max(1, (max_payload // 4) * 3)
+        offset = 0
+        while offset < len(payload_bytes):
+            chunk = payload_bytes[offset : offset + chunk_size]
+            chunk_b64 = base64.b64encode(chunk).decode("ascii")
+            resp = self._run_python(
+                chunk_script,
+                {
+                    "MSWEA_PATH": path,
+                    "MSWEA_CONTENT_B64": chunk_b64,
+                    "MSWEA_APPEND": "1" if offset else "0",
+                },
+            )
+            rc = resp.get("returncode", resp.get("exit_code", 0))
+            if rc != 0:
+                return resp.get("output", "file write failed")
+            offset += len(chunk)
         return None
 
     def _list_directory(self, path: str) -> tuple[list[str], int, str | None]:
@@ -534,28 +566,9 @@ with open(path, "r", encoding="utf-8", errors="replace") as f:
             path = self._resolve_path(action.path)
         except ValueError as e:
             return ErrorObservation(f"Invalid path {action.path}: {e}")
-        payload = base64.b64encode(action.content.encode("utf-8")).decode("ascii")
-        script = """import base64, os
-path = os.environ["MSWEA_PATH"]
-payload = base64.b64decode(os.environ["MSWEA_CONTENT_B64"]).decode("utf-8")
-parent = os.path.dirname(path)
-if parent:
-    os.makedirs(parent, exist_ok=True)
-with open(path, "w", encoding="utf-8") as f:
-    f.write(payload)
-"""
-        resp = self._run_python(
-            script,
-            {
-                "MSWEA_PATH": path,
-                "MSWEA_CONTENT_B64": payload,
-            },
-        )
-        rc = resp.get("returncode", resp.get("exit_code", 0))
-        if rc != 0:
-            return ErrorObservation(
-                f"File write failed for {action.path}: {resp.get('output', '')}"
-            )
+        write_err = self._write_file_text(path, action.content)
+        if write_err is not None:
+            return ErrorObservation(f"File write failed for {action.path}: {write_err}")
         return FileWriteObservation(content="", path=action.path)
 
     def _validate_llm_range(self, start: int, end: int, total_lines: int) -> str | None:
