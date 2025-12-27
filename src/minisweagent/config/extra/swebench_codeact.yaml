@@ -12,6 +12,7 @@ model:
 
 environment:
   environment_class: codeact
+  timeout: 300
 
 agent:
   max_steps: 100
