@@ -1,13 +1,14 @@
 model:
   model: "GLM-4.6"  # Tested working with the gateway
-  base_url: "http://gw-bzokqkvr2cblz8ok6y.cn-wulanchabu-acdr-1.pai-eas.aliyuncs.com/api/predict/a_1218_16_sj/v1"
-  api_key: "ODE0NzIzMjI1Y2Y2MDhhNDMyNWYxYmE0NzVlMDZiOTI0MzM1ZjViNg=="
+  base_url: "http://1755554923714054.cn-wulanchabu-acdr-1.pai-eas.aliyuncs.com/api/predict/sii_glm46_vllm0102_clone2/v1"
+  api_key: "NWEzOWZiYzA0N2E2OWQzNTVkYTNhZWM4YzU4YjYxMmZlZmRmNzFhNw=="
   num_retries: 10
   custom_llm_provider: "openai"  # needed by litellm
   temperature: 0.8
   top_p: 1.0
   native_tool_calling: true
-  log_completions: false   # set true + log_completions_folder to record LLM calls
+  log_completions: true
+  log_completions_folder: "tmp/llm_completions"   # 可换成你想要的路径
   drop_params: true        # keep OpenHands default param pruning
 
 environment:
@@ -15,6 +16,7 @@ environment:
 
 agent:
   max_steps: 100
+  timeout: 300
 
 run:
   env_startup_command: ""  # optional
