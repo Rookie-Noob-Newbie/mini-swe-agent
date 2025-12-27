@@ -129,6 +129,21 @@ class CodeActRunner:
             except Exception:
                 pass
 
+    def _fake_user_response(self, state: State) -> str:
+        msg = (
+            "Please continue working on the task on whatever approach you think is suitable.\n"
+            "When you think you have solved the question, please use the finish tool and include your final answer in the message parameter of the finish tool.\n"
+            "IMPORTANT: YOU SHOULD NEVER ASK FOR HUMAN HELP.\n"
+        )
+        user_msgs = [
+            event
+            for event in state.history
+            if isinstance(event, MessageAction) and event.source == EventSource.USER
+        ]
+        if len(user_msgs) >= 2:
+            return msg + 'If you want to give up, use the "finish" tool to finish the interaction.\n'
+        return msg
+
     def _make_config(self, llm_data: dict[str, Any] | None = None) -> OpenHandsConfig:
         llm_data = dict(llm_data or self.llm_config)
         llm_data.setdefault("custom_llm_provider", "openai")
@@ -383,18 +398,45 @@ class CodeActRunner:
                 except Exception:
                     pass
             elif isinstance(action, MessageAction):
-                # Non-tool assistant messages can happen if the model skips tool calls.
-                # Treat as a thought so the loop can continue.
                 msg = action.content or ""
-                obs = AgentThinkObservation(msg)
+                fake_msg = self._fake_user_response(state)
+                user_msg = MessageAction(content=fake_msg, wait_for_response=False)
+                user_msg._source = EventSource.USER  # type: ignore[attr-defined]
+                state.history.append(user_msg)
                 ms_logger.info(
-                    f"[CodeActRunner] iter={step_idx+1} sid={sid} MessageAction -> AgentThinkObservation"
+                    f"[CodeActRunner] iter={step_idx+1} sid={sid} MessageAction -> fake user response"
                 )
                 try:
                     with open(iter_log_path, "a", encoding="utf-8") as f:
                         f.write(f"iter={step_idx+1} message_action_content={msg[:200]!r}\n")
+                        f.write(f"iter={step_idx+1} fake_user_response_len={len(fake_msg)}\n")
                 except Exception:
                     pass
+
+                action_summary = msg
+                try:
+                    action_payload = event_to_dict(action)
+                    action_args = action_payload.get("args")
+                except Exception:
+                    action_args = None
+                step_rec = {
+                    "iter": step_idx + 1,
+                    "action_type": type(action).__name__,
+                    "action": action_summary,
+                    "action_message": getattr(action, "message", None),
+                    "action_thought": getattr(action, "thought", None),
+                    "action_args": action_args,
+                    "observation_type": "UserMessageAction",
+                    "exit_code": None,
+                    "obs_len": len(fake_msg),
+                }
+                try:
+                    with open(steps_path, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(step_rec, ensure_ascii=False) + "\n")
+                except Exception as e:
+                    ms_logger.error(f"[CodeActRunner] failed to write steps log: {e}")
+                state.iteration_flag.current_value += 1
+                continue
             elif hasattr(action, "action") and getattr(action, "action", "") == "think":
                 obs = AgentThinkObservation("Your thought has been logged.")
                 try:
