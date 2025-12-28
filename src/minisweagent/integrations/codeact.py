@@ -157,7 +157,6 @@ class CodeActRunner:
             enable_llm_editor=False,
             enable_mcp=False,
             enable_prompt_extensions=False,
-            enable_plan_mode=False,
         )
         agent_cfg.model_post_init(None)
         cfg = OpenHandsConfig(
