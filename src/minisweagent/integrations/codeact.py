@@ -131,20 +131,12 @@ class CodeActRunner:
         repo_path_q = shlex.quote(repo_path)
         base_commit = self.base_commit
         try:
-            status = self.env.execute(f"git -C {repo_path_q} status --porcelain")
-        except Exception as e:  # pragma: no cover
-            ms_logger.error(f"[CodeActRunner] failed to collect patch: {e}")
-            return ""
-        status_rc = status.get("returncode", status.get("exit_code", 0))
-        changes = status.get("output", "")
-        if status_rc != 0:
-            ms_logger.error(f"[CodeActRunner] git status failed rc={status_rc}")
-            return ""
-        if not changes.strip():
-            ms_logger.info("[CodeActRunner] no git changes to collect")
-            return ""
+            try:
+                self.env.execute(f"git -C {repo_path_q} config --global core.pager \"\"")
+                self.env.execute(f"git -C {repo_path_q} config --global diff.binary false")
+            except Exception:
+                pass
 
-        try:
             find_cmd = (
                 f"find {repo_path_q} -type d -name .git -not -path "
                 f"{shlex.quote(repo_path + '/.git')}"
@@ -175,35 +167,64 @@ class CodeActRunner:
             if bin_rc != 0:
                 ms_logger.error(f"[CodeActRunner] remove binary files failed rc={bin_rc}")
 
-            if base_commit:
-                diff_cmd = f"git diff --no-color --cached {shlex.quote(base_commit)} > patch.diff"
-            else:
-                diff_cmd = "git diff --no-color --cached > patch.diff"
-            diff_resp = self.env.execute(f"cd {repo_path_q} && {diff_cmd}")
-            diff_rc = diff_resp.get("returncode", diff_resp.get("exit_code", 0))
-            if diff_rc != 0 and base_commit:
-                ms_logger.error(
-                    f"[CodeActRunner] git diff base failed rc={diff_rc}, retrying without base"
-                )
-                diff_resp = self.env.execute(f"cd {repo_path_q} && git diff --no-color --cached > patch.diff")
+            n_retries = 0
+            git_patch = None
+            while n_retries < 5:
+                timeout = max(300 + 100 * n_retries, 600)
+                n_retries += 1
+                if base_commit:
+                    diff_cmd = f"git diff --no-color --cached {shlex.quote(base_commit)} > patch.diff"
+                else:
+                    diff_cmd = "git diff --no-color --cached > patch.diff"
+                diff_resp = self.env.execute(f"cd {repo_path_q} && {diff_cmd}", timeout=timeout)
                 diff_rc = diff_resp.get("returncode", diff_resp.get("exit_code", 0))
-            if diff_rc != 0:
-                ms_logger.error(f"[CodeActRunner] git diff failed rc={diff_rc}")
-                return ""
+                if diff_rc != 0:
+                    ms_logger.info("[CodeActRunner] Failed to get git diff, retrying...")
+                    time.sleep(10)
+                    continue
 
-            patch_resp = self.env.execute(f"cd {repo_path_q} && cat patch.diff")
-            patch_rc = patch_resp.get("returncode", patch_resp.get("exit_code", 0))
-            patch = patch_resp.get("output", "")
-            if patch_rc != 0:
-                ms_logger.error(f"[CodeActRunner] cat patch.diff failed rc={patch_rc}")
-                return ""
+                read_cmd = (
+                    f"cd {repo_path_q} && python - <<'PY'\n"
+                    "import sys\n"
+                    "try:\n"
+                    "    with open('patch.diff', 'r', encoding='utf-8') as f:\n"
+                    "        sys.stdout.write(f.read())\n"
+                    "except UnicodeDecodeError:\n"
+                    "    sys.stdout.write('File could not be decoded as utf-8')\n"
+                    "    sys.exit(1)\n"
+                    "except Exception as e:\n"
+                    "    sys.stdout.write(str(e))\n"
+                    "    sys.exit(1)\n"
+                    "PY"
+                )
+                read_resp = self.env.execute(read_cmd, timeout=timeout)
+                read_rc = read_resp.get("returncode", read_resp.get("exit_code", 0))
+                if read_rc == 0:
+                    git_patch = read_resp.get("output", "")
+                    break
 
-            if patch and patch.strip():
-                patch = self._remove_binary_diffs(patch)
-                ms_logger.info(f"[CodeActRunner] collected git diff patch ({len(patch)} chars)")
-                return patch
-            ms_logger.error("[CodeActRunner] staged changes detected but diff was empty")
-            return ""
+                read_err = read_resp.get("output", "")
+                if "File could not be decoded as utf-8" in read_err:
+                    patch_resp = self.env.execute(
+                        f"cd {repo_path_q} && cat patch.diff",
+                        timeout=timeout,
+                    )
+                    patch_rc = patch_resp.get("returncode", patch_resp.get("exit_code", 0))
+                    if patch_rc == 0:
+                        git_patch = patch_resp.get("output", "")
+                        break
+                    ms_logger.error(f"[CodeActRunner] cat patch.diff failed rc={patch_rc}")
+                else:
+                    ms_logger.error(f"[CodeActRunner] Failed to read patch.diff: {read_err}")
+
+                time.sleep(10)
+
+            if git_patch is None:
+                raise RuntimeError("Failed to get git diff (None)")
+
+            git_patch = self._remove_binary_diffs(git_patch)
+            ms_logger.info(f"[CodeActRunner] collected git diff patch ({len(git_patch)} chars)")
+            return git_patch
         finally:
             try:
                 self.env.execute(f"git -C {repo_path_q} reset")
