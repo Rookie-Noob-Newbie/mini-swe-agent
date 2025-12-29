@@ -13,6 +13,7 @@ import shutil
 import threading
 import time
 import traceback
+from dataclasses import dataclass
 from pathlib import Path
 
 import logging
@@ -121,6 +122,74 @@ Phase 7. VERIFICATION: Test your implementation thoroughly.
 
 Be thorough in your exploration, testing, and reasoning. It's fine if your thinking process is lengthy - quality and completeness are more important than brevity.
 """
+
+_DEFAULT_MAX_RETRIES = int(os.getenv("EVAL_MAX_RETRIES", "5"))
+_DEFAULT_TIMEOUT_SECONDS = int(os.getenv("EVAL_TIMEOUT_SECONDS", str(8 * 60 * 60)))
+
+
+class _EvalAbort(Exception):
+    pass
+
+
+def _should_skip_maximum_retries() -> bool:
+    return os.getenv("EVAL_SKIP_MAXIMUM_RETRIES_EXCEEDED", "false").lower() == "true"
+
+
+def _log_maximum_retries_exceeded(output_dir: Path, instance_id: str, error: str) -> None:
+    retries_path = output_dir / "maximum_retries_exceeded.jsonl"
+    entry = {
+        "instance_id": instance_id,
+        "error": error,
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    with _OUTPUT_FILE_LOCK:
+        with retries_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+
+
+def _log_maximum_retries_notice(output_dir: Path) -> None:
+    retries_path = output_dir / "maximum_retries_exceeded.jsonl"
+    if retries_path.exists():
+        logger.info("ATTENTION: Some instances reached maximum error retries and were skipped.")
+        logger.info(f"These instances are listed in: {retries_path}")
+        logger.info(
+            "Fix these instances and run evaluation again with EVAL_SKIP_MAXIMUM_RETRIES_EXCEEDED=false"
+        )
+
+
+def _is_fatal_runtime_error(error: str | None) -> bool:
+    if not error:
+        return False
+    fatal_errors = [
+        "AgentRuntimeTimeoutError",
+        "AgentRuntimeUnavailableError",
+        "AgentRuntimeDisconnectedError",
+        "AgentRuntimeNotFoundError",
+    ]
+    return any(err in error for err in fatal_errors)
+
+
+class _ThreadAllowlistFilter(logging.Filter):
+    def __init__(self, allowed_threads: set[int]) -> None:
+        super().__init__()
+        self._allowed_threads = allowed_threads
+
+    def allow_thread(self, thread_id: int | None) -> None:
+        if thread_id is None:
+            return
+        self._allowed_threads.add(thread_id)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.thread in self._allowed_threads
+
+
+@dataclass
+class _InstanceRunResult:
+    exit_status: str
+    result: str
+    extra_info: dict | None
+    agent: DefaultAgent | None
+    model_name_for_output: str
 
 
 def _get_swebench_workspace_dir_name(instance: dict) -> str:
@@ -232,6 +301,133 @@ def remove_from_preds_file(output_path: Path, instance_id: str):
             output_path.write_text(json.dumps(output_data, indent=2))
 
 
+def _run_instance_once(
+    instance: dict,
+    output_dir: Path,
+    config: dict,
+    progress_manager: RunBatchProgressManager,
+    instance_dir: Path,
+    *,
+    env_holder: dict[str, Environment] | None = None,
+) -> _InstanceRunResult:
+    use_codeact = config.get("environment", {}).get("environment_class") == "codeact"
+    model = None if use_codeact else get_model(config=config.get("model", {}))
+    task = build_openhands_swebench_instruction(instance)
+
+    progress_manager.update_instance_status(instance["instance_id"], "Pulling/starting docker")
+    env = get_sb_environment(config, instance)
+    if env_holder is not None:
+        env_holder["env"] = env
+    workspace_dir_name = setup_openhands_workspace(env, instance)
+
+    agent: DefaultAgent | None = None
+    extra_info: dict | None = None
+
+    if use_codeact:
+        progress_manager.update_instance_status(instance["instance_id"], "CodeAct: starting")
+        logger.info(f"[CodeAct] Starting instance {instance['instance_id']}")
+        runner = CodeActRunner(
+            env=env,
+            llm_config=config.get("model", {}),
+            max_steps=config.get("agent", {}).get("max_steps", 100),
+            run_id=instance["instance_id"],
+            repo_path=f"/workspace/{workspace_dir_name}",
+            base_commit=instance.get("base_commit"),
+        )
+        res = runner.run_instance(
+            task,
+            progress_callback=lambda msg, iid=instance["instance_id"]: progress_manager.update_instance_status(iid, msg),
+        )
+        exit_status, result = res.exit_status, res.result
+        progress_manager.update_instance_status(instance["instance_id"], f"CodeAct: {exit_status}")
+        if res.steps_path:
+            try:
+                shutil.copy(res.steps_path, instance_dir / "codeact_steps.jsonl")
+            except Exception as e:
+                logger.error(f"Failed to copy steps log: {e}", exc_info=True)
+        if res.history_path:
+            try:
+                shutil.copy(res.history_path, instance_dir / "codeact_history.jsonl")
+            except Exception as e:
+                logger.error(f"Failed to copy history log: {e}", exc_info=True)
+    else:
+        agent = ProgressTrackingAgent(
+            model,
+            env,
+            progress_manager=progress_manager,
+            instance_id=instance["instance_id"],
+            **config.get("agent", {}),
+        )
+        exit_status, result = agent.run(task)
+
+    model_name_for_output = (
+        model.config.model_name if model is not None else config.get("model", {}).get("model", "unknown")
+    )
+    return _InstanceRunResult(
+        exit_status=exit_status,
+        result=result,
+        extra_info=extra_info,
+        agent=agent,
+        model_name_for_output=model_name_for_output,
+    )
+
+
+def _run_instance_with_timeout(
+    *,
+    instance: dict,
+    output_dir: Path,
+    config: dict,
+    progress_manager: RunBatchProgressManager,
+    instance_dir: Path,
+    timeout_seconds: int | None,
+    thread_filter: _ThreadAllowlistFilter,
+    env_holder: dict[str, Environment] | None,
+) -> tuple[_InstanceRunResult | None, Exception | None, str | None, bool]:
+    if timeout_seconds is None:
+        try:
+            res = _run_instance_once(
+                instance,
+                output_dir,
+                config,
+                progress_manager,
+                instance_dir,
+                env_holder=env_holder,
+            )
+            return res, None, None, False
+        except Exception as e:
+            return None, e, traceback.format_exc(), False
+
+    result_holder: dict[str, _InstanceRunResult] = {}
+    error_holder: dict[str, Exception] = {}
+    traceback_holder: dict[str, str] = {}
+    done = threading.Event()
+
+    def _target() -> None:
+        try:
+            result_holder["result"] = _run_instance_once(
+                instance,
+                output_dir,
+                config,
+                progress_manager,
+                instance_dir,
+                env_holder=env_holder,
+            )
+        except Exception as e:
+            error_holder["error"] = e
+            traceback_holder["traceback"] = traceback.format_exc()
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=_target, daemon=True)
+    thread.start()
+    thread_filter.allow_thread(thread.ident)
+    if not done.wait(timeout_seconds):
+        return None, None, None, True
+    if error_holder:
+        return None, error_holder.get("error"), traceback_holder.get("traceback"), False
+    return result_holder.get("result"), None, None, False
+
+
 def process_instance(
     instance: dict,
     output_dir: Path,
@@ -240,97 +436,120 @@ def process_instance(
 ) -> None:
     """Process a single SWEBench instance."""
     # work on a private copy so per-instance mutations (e.g., environment_class rewrite) don't leak across threads
-    config = copy.deepcopy(config)
-    instance = copy.deepcopy(instance)
-    instance_id = instance["instance_id"]
+    config_base = copy.deepcopy(config)
+    instance_base = copy.deepcopy(instance)
+    instance_id = instance_base["instance_id"]
     instance_dir = output_dir / instance_id
     instance_dir.mkdir(parents=True, exist_ok=True)
-    # avoid inconsistent state if something here fails and there's leftover previous files
     remove_from_preds_file(output_dir / "preds.json", instance_id)
     (instance_dir / f"{instance_id}.traj.json").unlink(missing_ok=True)
-    use_codeact = config.get("environment", {}).get("environment_class") == "codeact"
-    model = None if use_codeact else get_model(config=config.get("model", {}))
-    task = build_openhands_swebench_instruction(instance)
 
     progress_manager.on_instance_start(instance_id)
-    progress_manager.update_instance_status(instance_id, "Pulling/starting docker")
 
     # per-instance file log: only records emitted from this worker thread
     per_instance_handlers: list[logging.Handler] = []
-    thread_ident = threading.get_ident()
+    allowed_threads = {threading.get_ident()}
+    thread_filter = _ThreadAllowlistFilter(allowed_threads)
     handler = logging.FileHandler(instance_dir / "minisweagent.log")
     handler.setLevel(logging.DEBUG)
     handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
-    handler.addFilter(lambda record, thread_ident=thread_ident: record.thread == thread_ident)
+    handler.addFilter(thread_filter)
     per_instance_handlers.append(handler)
     for logger_name in ("minisweagent", "openhands"):
         logging.getLogger(logger_name).addHandler(handler)
     logging.getLogger().addHandler(handler)
 
-    agent = None
-    extra_info = None
+    agent: DefaultAgent | None = None
+    extra_info: dict | None = None
+    exit_status = "error"
+    result = ""
+    model_name_for_output = config_base.get("model", {}).get("model", "unknown")
+    max_retries = _DEFAULT_MAX_RETRIES
+    timeout_seconds = _DEFAULT_TIMEOUT_SECONDS
+    runtime_failure_count = 0
+    write_outputs = True
 
     try:
-        env = get_sb_environment(config, instance)
-        workspace_dir_name = setup_openhands_workspace(env, instance)
-        if use_codeact:
-            progress_manager.update_instance_status(instance_id, "CodeAct: starting")
-            logger.info(f"[CodeAct] Starting instance {instance_id}")
-            runner = CodeActRunner(
-                env=env,
-                llm_config=config.get("model", {}),
-                max_steps=config.get("agent", {}).get("max_steps", 100),
-                run_id=instance_id,
-                repo_path=f"/workspace/{workspace_dir_name}",
-                base_commit=instance.get("base_commit"),
+        for attempt in range(max_retries + 1):
+            progress_manager.update_instance_status(
+                instance_id, f"Attempt {attempt + 1}/{max_retries + 1}"
             )
-            res = runner.run_instance(
-                task,
-                progress_callback=lambda msg, iid=instance_id: progress_manager.update_instance_status(iid, msg),
-            )
-            exit_status, result = res.exit_status, res.result
-            progress_manager.update_instance_status(instance_id, f"CodeAct: {exit_status}")
-            # copy steps log to instance dir for inspection
-            if res.steps_path:
-                try:
-                    shutil.copy(res.steps_path, instance_dir / "codeact_steps.jsonl")
-                except Exception as e:
-                    logger.error(f"Failed to copy steps log: {e}", exc_info=True)
-            if res.history_path:
-                try:
-                    shutil.copy(res.history_path, instance_dir / "codeact_history.jsonl")
-                except Exception as e:
-                    logger.error(f"Failed to copy history log: {e}", exc_info=True)
-        else:
-            agent = ProgressTrackingAgent(
-                model,
-                env,
+            config_attempt = copy.deepcopy(config_base)
+            instance_attempt = copy.deepcopy(instance_base)
+            env_holder: dict[str, Environment] = {}
+
+            res, error, tb, timed_out = _run_instance_with_timeout(
+                instance=instance_attempt,
+                output_dir=output_dir,
+                config=config_attempt,
                 progress_manager=progress_manager,
-                instance_id=instance_id,
-                **config.get("agent", {}),
+                instance_dir=instance_dir,
+                timeout_seconds=timeout_seconds,
+                thread_filter=thread_filter,
+                env_holder=env_holder,
             )
-            exit_status, result = agent.run(task)
-    except Exception as e:
-        logger.error(f"Error processing instance {instance_id}: {e}", exc_info=True)
-        if use_codeact:
-            progress_manager.update_instance_status(instance_id, f"CodeAct error: {type(e).__name__}")
-        exit_status, result = type(e).__name__, str(e)
-        extra_info = {"traceback": traceback.format_exc()}
+
+            if timed_out:
+                exit_status = "timeout"
+                result = f"Timeout after {timeout_seconds} seconds"
+                extra_info = {"traceback": f"Timeout after {timeout_seconds} seconds"}
+                try:
+                    cleanup = getattr(env_holder.get("env"), "cleanup", None)
+                    if callable(cleanup):
+                        cleanup()
+                except Exception:
+                    pass
+                break
+
+            if error is None and res is not None:
+                exit_status = res.exit_status
+                result = res.result
+                extra_info = res.extra_info
+                agent = res.agent
+                model_name_for_output = res.model_name_for_output
+                break
+
+            error = error or RuntimeError("Unknown error")
+            tb = tb or traceback.format_exc()
+            error_msg = f"{type(error).__name__}: {error}"
+            if attempt == max_retries:
+                if _should_skip_maximum_retries():
+                    _log_maximum_retries_exceeded(output_dir, instance_id, error_msg)
+                    exit_status = "error"
+                    result = f"Maximum retries ({max_retries}) reached: {error}"
+                    extra_info = {"traceback": tb}
+                    break
+                raise _EvalAbort(
+                    f"Maximum error retries reached for instance {instance_id}"
+                ) from error
+
+            if _is_fatal_runtime_error(error_msg):
+                runtime_failure_count += 1
+                logger.error(
+                    f"Runtime disconnected error detected for instance {instance_id}, runtime failure count: {runtime_failure_count}"
+                )
+
+            logger.error(
+                f"Error in instance [{instance_id}]: {error_msg}. Retrying... (attempt {attempt + 1} of {max_retries})",
+                exc_info=error,
+            )
+            time.sleep(5)
+    except _EvalAbort:
+        write_outputs = False
+        raise
     finally:
-        save_traj(
-            agent,
-            instance_dir / f"{instance_id}.traj.json",
-            exit_status=exit_status,
-            result=result,
-            extra_info=extra_info,
-            instance_id=instance_id,
-            print_fct=logger.info,
-        )
-        model_name_for_output = (
-            model.config.model_name if model is not None else config.get("model", {}).get("model", "unknown")
-        )
-        update_preds_file(output_dir / "preds.json", instance_id, model_name_for_output, result)
-        progress_manager.on_instance_end(instance_id, exit_status)
+        if write_outputs:
+            save_traj(
+                agent,
+                instance_dir / f"{instance_id}.traj.json",
+                exit_status=exit_status,
+                result=result,
+                extra_info=extra_info,
+                instance_id=instance_id,
+                print_fct=logger.info,
+            )
+            update_preds_file(output_dir / "preds.json", instance_id, model_name_for_output, result)
+            progress_manager.on_instance_end(instance_id, exit_status)
         # remove per-instance handlers so reused threads don't leak logs across instances
         for h in per_instance_handlers:
             for logger_name in ("minisweagent", "openhands"):
@@ -431,6 +650,12 @@ def main(
                 future.result()
             except concurrent.futures.CancelledError:
                 pass
+            except _EvalAbort as e:
+                logger.error(str(e))
+                for pending in futures:
+                    if not pending.running() and not pending.done():
+                        pending.cancel()
+                raise
             except Exception as e:
                 instance_id = futures[future]
                 logger.error(f"Error in future for instance {instance_id}: {e}", exc_info=True)
@@ -452,6 +677,7 @@ def main(
                     if not future.running() and not future.done():
                         future.cancel()
                 process_futures(futures)
+    _log_maximum_retries_notice(output_path)
 
 
 if __name__ == "__main__":
