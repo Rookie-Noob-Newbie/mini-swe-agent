@@ -130,6 +130,8 @@ class CodeActRunner:
         repo_path = self.repo_path
         repo_path_q = shlex.quote(repo_path)
         base_commit = self.base_commit
+        if not base_commit:
+            raise RuntimeError("base_commit is required to collect patch")
         try:
             try:
                 self.env.execute(f"git -C {repo_path_q} config --global core.pager \"\"")
@@ -172,10 +174,7 @@ class CodeActRunner:
             while n_retries < 5:
                 timeout = max(300 + 100 * n_retries, 600)
                 n_retries += 1
-                if base_commit:
-                    diff_cmd = f"git diff --no-color --cached {shlex.quote(base_commit)} > patch.diff"
-                else:
-                    diff_cmd = "git diff --no-color --cached > patch.diff"
+                diff_cmd = f"git diff --no-color --cached {shlex.quote(base_commit)} > patch.diff"
                 diff_resp = self.env.execute(f"cd {repo_path_q} && {diff_cmd}", timeout=timeout)
                 diff_rc = diff_resp.get("returncode", diff_resp.get("exit_code", 0))
                 if diff_rc != 0:
