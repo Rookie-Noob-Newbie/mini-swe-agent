@@ -213,7 +213,7 @@ class CodeActRunner:
     def _fake_user_response(self, state: State) -> str:
         msg = (
             "Please continue working on the task on whatever approach you think is suitable.\n"
-            "If you think you have solved the task, please first send your answer to user through message and then finish the interaction.\n"
+            "When you think you have solved the question, please use the finish tool and include your final answer in the message parameter of the finish tool.\n"
             "IMPORTANT: YOU SHOULD NEVER ASK FOR HUMAN HELP.\n"
         )
         user_msgs = [
@@ -222,7 +222,7 @@ class CodeActRunner:
             if isinstance(event, MessageAction) and event.source == EventSource.USER
         ]
         if len(user_msgs) >= 2:
-            return msg + 'If you want to give up, run: <execute_bash> exit </execute_bash>.\n'
+            return msg + 'If you want to give up, use the "finish" tool to finish the interaction.\n'
         return msg
 
     def _make_config(self, llm_data: dict[str, Any] | None = None) -> OpenHandsConfig:
