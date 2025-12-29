@@ -273,6 +273,7 @@ def get_sb_environment(config: dict, instance: dict) -> Environment:
         out = env.execute(startup_command)
         if out["returncode"] != 0:
             raise RuntimeError(f"Error executing startup command: {out}")
+    _activate_testbed_conda(env)
     return env
 
 
@@ -299,6 +300,31 @@ def remove_from_preds_file(output_path: Path, instance_id: str):
         if instance_id in output_data:
             del output_data[instance_id]
             output_path.write_text(json.dumps(output_data, indent=2))
+
+
+def _activate_testbed_conda(env: Environment) -> None:
+    """Set PATH/env vars so commands use the testbed conda environment when available."""
+    try:
+        check = env.execute("test -d /opt/miniconda3/envs/testbed")
+        if check.get("returncode", check.get("exit_code", 0)) != 0:
+            return
+        resp = env.execute(
+            "source /opt/miniconda3/etc/profile.d/conda.sh && conda activate testbed && echo $PATH"
+        )
+        if resp.get("returncode", resp.get("exit_code", 0)) != 0:
+            logger.warning("Failed to activate testbed conda environment.")
+            return
+        path = (resp.get("output", "") or "").strip().splitlines()[-1:]
+        if not path:
+            return
+        cfg = getattr(env, "config", None)
+        if cfg is None or not hasattr(cfg, "env"):
+            return
+        cfg.env["PATH"] = path[0]
+        cfg.env.setdefault("CONDA_DEFAULT_ENV", "testbed")
+        cfg.env.setdefault("CONDA_PREFIX", "/opt/miniconda3/envs/testbed")
+    except Exception as exc:
+        logger.warning(f"Failed to set testbed conda env: {exc}")
 
 
 def _run_instance_once(
