@@ -728,8 +728,16 @@ print(json.dumps({"ok": True, "items": items, "hidden_count": hidden_count}))
                 ms_logger.error(f"[OpenHandsCompatRuntime] interactive run failed: {e}")
                 return ErrorObservation(f"Runtime execution failed: {e}")
         if action.is_input:
-            return ErrorObservation(
-                "CLIRuntime does not support interactive input from the agent."
+            display_cwd = self._display_from_actual(cwd) if cwd else "/workspace"
+            metadata = {"exit_code": -1, "working_dir": display_cwd}
+            if action.command.strip():
+                content = "ERROR: No previous running command to interact with."
+            else:
+                content = "ERROR: No previous running command to retrieve logs from."
+            return CmdOutputObservation(
+                content=content,
+                command=action.command,
+                metadata=metadata,
             )
         try:
             result = self.env.execute(action.command, cwd=cwd)
