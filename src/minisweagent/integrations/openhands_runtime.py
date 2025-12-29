@@ -8,10 +8,10 @@ import os
 import posixpath
 import re
 import shlex
-import signal
 import subprocess
 import threading
 import time
+import uuid
 from typing import Any
 
 from minisweagent import Environment
@@ -68,8 +68,12 @@ class _DockerExecSession:
         self._reader_thread: threading.Thread | None = None
         self._buffer = io.StringIO()
         self._buffer_lock = threading.Lock()
-        self._consumed_pos = 0
         self._last_output_time: float | None = None
+        self._pending_start_marker: str | None = None
+        self._pending_end_marker: str | None = None
+        self._pending_output_start: int | None = None
+        self._pending_output_cursor: int | None = None
+        self._pending_start_time: float | None = None
 
     @classmethod
     def from_env(cls, env: Environment) -> "_DockerExecSession | None":
@@ -92,16 +96,31 @@ class _DockerExecSession:
     def _reset_buffer(self) -> None:
         with self._buffer_lock:
             self._buffer = io.StringIO()
-            self._consumed_pos = 0
 
-    def _consume_output(self) -> str:
+    def _trim_buffer(self, upto: int) -> None:
+        if upto <= 0:
+            return
         with self._buffer_lock:
             data = self._buffer.getvalue()
-            if self._consumed_pos >= len(data):
-                return ""
-            chunk = data[self._consumed_pos :]
-            self._consumed_pos = len(data)
-        return chunk
+            if upto >= len(data):
+                self._buffer = io.StringIO()
+                self._pending_output_start = None
+                self._pending_output_cursor = None
+                return
+            remaining = data[upto:]
+            self._buffer = io.StringIO()
+            self._buffer.write(remaining)
+            if self._pending_output_start is not None:
+                self._pending_output_start = max(self._pending_output_start - upto, 0)
+            if self._pending_output_cursor is not None:
+                self._pending_output_cursor = max(self._pending_output_cursor - upto, 0)
+
+    def _clear_pending(self) -> None:
+        self._pending_start_marker = None
+        self._pending_end_marker = None
+        self._pending_output_start = None
+        self._pending_output_cursor = None
+        self._pending_start_time = None
 
     def _reader(self, stream: io.TextIOBase) -> None:
         try:
@@ -115,19 +134,20 @@ class _DockerExecSession:
         except Exception:
             pass
 
-    def _build_exec_cmd(self, cwd: str, command: str) -> list[str]:
-        cmd = [self.docker_executable, "exec", "-i", "-w", cwd]
+    def _build_exec_cmd(self) -> list[str]:
+        cmd = [self.docker_executable, "exec", "-i", "-w", self.base_cwd]
         for key in self.forward_env:
             if (value := os.getenv(key)) is not None:
                 cmd.extend(["-e", f"{key}={value}"])
         for key, value in self.env_vars.items():
             cmd.extend(["-e", f"{key}={str(value)}"])
-        cmd.extend([self.container_id, "bash", "-lc", command])
+        cmd.extend([self.container_id, "bash", "-i"])
         return cmd
 
-    def _start_process(self, command: str, cwd: str) -> None:
+    def _start_shell(self) -> None:
         self._reset_buffer()
-        exec_cmd = self._build_exec_cmd(cwd, command)
+        self._clear_pending()
+        exec_cmd = self._build_exec_cmd()
         self._proc = subprocess.Popen(
             exec_cmd,
             stdin=subprocess.PIPE,
@@ -144,77 +164,112 @@ class _DockerExecSession:
                 daemon=True,
             )
             self._reader_thread.start()
+        self._write_raw("export PS1=''\n")
 
-    def _send_input(self, command: str) -> None:
+    def _ensure_shell(self) -> bool:
+        if self._proc is None or self._proc.poll() is not None:
+            self._start_shell()
+        return self._proc is not None
+
+    def _write_raw(self, payload: str) -> None:
         if not self._proc or self._proc.stdin is None:
             return
-        if command in {"C-c", "C-z"}:
-            sig = signal.SIGINT if command == "C-c" else getattr(signal, "SIGTSTP", None)
-            if sig is not None:
-                try:
-                    self._proc.send_signal(sig)
-                    return
-                except Exception:
-                    pass
-            try:
-                self._proc.stdin.write("\x03" if command == "C-c" else "\x1a")
-                self._proc.stdin.flush()
-            except Exception:
-                return
-        if command == "C-d":
-            try:
-                self._proc.stdin.write("\x04")
-                self._proc.stdin.flush()
-            except Exception:
-                try:
-                    self._proc.stdin.close()
-                except Exception:
-                    pass
-            return
         try:
-            self._proc.stdin.write(command + "\n")
+            self._proc.stdin.write(payload)
             self._proc.stdin.flush()
         except Exception:
             return
 
-    def _finalize_process(self) -> int:
-        if not self._proc:
-            return 0
-        if self._reader_thread:
-            try:
-                self._reader_thread.join(timeout=1)
-            except Exception:
-                pass
-        returncode = self._proc.poll()
-        if returncode is None:
-            returncode = 0
-        self._proc = None
-        self._reader_thread = None
-        self._reset_buffer()
-        return returncode
+    def _send_input(self, command: str) -> None:
+        if command in {"C-c", "C-z", "C-d"}:
+            mapping = {"C-c": "\x03", "C-z": "\x1a", "C-d": "\x04"}
+            self._write_raw(mapping[command])
+            return
+        if command:
+            self._write_raw(command + "\n")
 
-    def _wait_for_completion(
+    def _wrap_command(self, command: str, cwd: str, start_marker: str, end_marker: str) -> str:
+        command = command.replace("\r\n", "\n").replace("\r", "\n")
+        if cwd:
+            command = f"cd {shlex.quote(cwd)}\n{command}"
+        return (
+            f'printf "%s\\n" "{start_marker}"\n'
+            f'{{\n{command}\n}};\n'
+            "__MSWEA_RC=$?\n"
+            f'printf "%s%d\\n" "{end_marker}" "${__MSWEA_RC}"\n'
+        )
+
+    def _start_command(self, command: str, cwd: str) -> None:
+        marker = uuid.uuid4().hex[:8]
+        start_marker = f"__MSWEA_START__{marker}__"
+        end_marker = f"__MSWEA_END__{marker}__RC__"
+        self._pending_start_marker = start_marker
+        self._pending_end_marker = end_marker
+        self._pending_output_start = None
+        self._pending_output_cursor = None
+        self._pending_start_time = time.time()
+        self._reset_buffer()
+        wrapped = self._wrap_command(command, cwd, start_marker, end_marker)
+        self._write_raw(wrapped + "\n")
+
+    def _collect_pending_output(self) -> tuple[str, bool, int | None]:
+        if not self._pending_start_marker or not self._pending_end_marker:
+            return "", False, None
+        with self._buffer_lock:
+            data = self._buffer.getvalue()
+        if self._pending_output_start is None:
+            start_idx = data.find(self._pending_start_marker)
+            if start_idx != -1:
+                start_idx += len(self._pending_start_marker)
+                if start_idx < len(data) and data[start_idx] == "\n":
+                    start_idx += 1
+                self._pending_output_start = start_idx
+                self._pending_output_cursor = start_idx
+        if self._pending_output_start is None:
+            return "", False, None
+        end_idx = data.find(self._pending_end_marker, self._pending_output_start)
+        if end_idx != -1:
+            rc_start = end_idx + len(self._pending_end_marker)
+            rc_end = data.find("\n", rc_start)
+            if rc_end == -1:
+                rc_end = len(data)
+            rc_str = data[rc_start:rc_end].strip()
+            try:
+                exit_code = int(rc_str)
+            except ValueError:
+                exit_code = 0
+            cursor = self._pending_output_cursor or self._pending_output_start
+            output = data[cursor:end_idx]
+            trim_to = rc_end + 1 if rc_end < len(data) else rc_end
+            self._trim_buffer(trim_to)
+            self._clear_pending()
+            return output, True, exit_code
+        cursor = self._pending_output_cursor or self._pending_output_start
+        output = data[cursor:]
+        if self._pending_output_cursor is not None:
+            self._pending_output_cursor = len(data)
+        return output, False, None
+
+    def _wait_for_pending(
         self,
         *,
-        start_time: float,
         hard_timeout: float | None,
         allow_no_change: bool,
     ) -> tuple[str, int, str]:
+        output_parts: list[str] = []
+        start_time = self._pending_start_time or time.time()
         while True:
-            if self._proc is None:
-                return "", 0, "finished"
-            if self._proc.poll() is not None:
-                output = self._consume_output()
-                exit_code = self._finalize_process()
-                return output, exit_code, "finished"
+            chunk, finished, exit_code = self._collect_pending_output()
+            if chunk:
+                output_parts.append(chunk)
+            if finished:
+                return "".join(output_parts), exit_code or 0, "finished"
             now = time.time()
             if hard_timeout is not None and now - start_time >= hard_timeout:
-                output = self._consume_output()
-                return output, -1, "timeout"
+                return "".join(output_parts), -1, "timeout"
             last_output = self._last_output_time or start_time
             if allow_no_change and now - last_output >= self.no_change_timeout:
-                output = self._consume_output()
-                return output, -1, "no_change"
+                return "".join(output_parts), -1, "no_change"
             time.sleep(self.poll_interval)
 
     def run(
@@ -226,34 +281,32 @@ class _DockerExecSession:
         is_input: bool,
         blocking: bool,
     ) -> tuple[str, int, str]:
-        if self._proc is not None and self._proc.poll() is not None:
-            self._consume_output()
-            self._finalize_process()
-        if self._proc is None:
-            if command == "":
-                return "ERROR: No previous running command to retrieve logs from.", -1, "no_prev"
-            if is_input:
-                return "ERROR: No previous running command to interact with.", -1, "no_prev"
-            self._start_process(command, cwd)
-            return self._wait_for_completion(
-                start_time=time.time(),
+        if not self._ensure_shell():
+            return "ERROR: Failed to start shell.", -1, "error"
+        has_pending = self._pending_start_marker is not None
+        if has_pending:
+            if not is_input and command != "":
+                output, _, _ = self._collect_pending_output()
+                if output:
+                    output = "[Below is the output of the previous command.]\n" + output
+                output += (
+                    f'\n[Your command "{command}" is NOT executed. '
+                    "The previous command is still running - You CANNOT send new commands until the previous command is completed. "
+                    f"{_TIMEOUT_MESSAGE_TEMPLATE}]"
+                )
+                return output, -1, "busy"
+            if command:
+                self._send_input(command)
+            return self._wait_for_pending(
                 hard_timeout=hard_timeout,
                 allow_no_change=not blocking,
             )
-        if not is_input and command != "":
-            output = self._consume_output()
-            if output:
-                output = "[Below is the output of the previous command.]\n" + output
-            output += (
-                f'\n[Your command "{command}" is NOT executed. '
-                "The previous command is still running - You CANNOT send new commands until the previous command is completed. "
-                f"{_TIMEOUT_MESSAGE_TEMPLATE}]"
-            )
-            return output, -1, "busy"
-        if command:
-            self._send_input(command)
-        return self._wait_for_completion(
-            start_time=time.time(),
+        if command == "":
+            return "ERROR: No previous running command to retrieve logs from.", -1, "no_prev"
+        if is_input:
+            return "ERROR: No previous running command to interact with.", -1, "no_prev"
+        self._start_command(command, cwd)
+        return self._wait_for_pending(
             hard_timeout=hard_timeout,
             allow_no_change=not blocking,
         )
@@ -261,6 +314,10 @@ class _DockerExecSession:
     def close(self) -> None:
         if self._proc is None:
             return
+        try:
+            self._write_raw("exit\n")
+        except Exception:
+            pass
         try:
             self._proc.terminate()
         except Exception:
@@ -697,7 +754,7 @@ print(json.dumps({"ok": True, "items": items, "hidden_count": hidden_count}))
             try:
                 output, exit_code, status = self._cmd_session.run(
                     command=action.command,
-                    cwd=cwd or self._cmd_session.base_cwd,
+                    cwd=cwd,
                     hard_timeout=action.timeout,
                     is_input=action.is_input,
                     blocking=action.blocking,
