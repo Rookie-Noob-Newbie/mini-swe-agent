@@ -196,7 +196,7 @@ class _DockerExecSession:
             f'printf "%s\\n" "{start_marker}"\n'
             f'{{\n{command}\n}};\n'
             "__MSWEA_RC=$?\n"
-            f'printf "%s%d\\n" "{end_marker}" "${__MSWEA_RC}"\n'
+            f'printf "%s%d\\n" "{end_marker}" "${{__MSWEA_RC}}"\n'
         )
 
     def _start_command(self, command: str, cwd: str) -> None:
