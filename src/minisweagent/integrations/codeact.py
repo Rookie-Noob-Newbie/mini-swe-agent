@@ -347,6 +347,7 @@ class CodeActRunner:
 
         exit_status = "timeout"
         result = ""
+        reached_max_steps = False
         for step_idx in range(self.max_steps):
             ms_logger.info(f"[CodeActRunner] iter={step_idx+1} sid={sid} calling agent.step")
             if progress_callback:
@@ -635,12 +636,17 @@ class CodeActRunner:
         else:
             exit_status = "timeout"
             result = "Agent reached max steps without finishing"
+            reached_max_steps = True
 
         ms_logger.info(f"[CodeActRunner] end run_instance sid={sid} status={exit_status}")
 
         # Prefer returning the actual code diff when available.
-        if exit_status == "finished":
-            patch = self._collect_patch()
+        if exit_status == "finished" or reached_max_steps:
+            try:
+                patch = self._collect_patch()
+            except Exception as e:
+                ms_logger.error(f"[CodeActRunner] failed to collect patch: {e}")
+                patch = ""
             if patch:
                 result = patch
 
