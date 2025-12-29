@@ -2,11 +2,16 @@
 
 import base64
 import hashlib
+import io
 import json
 import os
 import posixpath
 import re
 import shlex
+import signal
+import subprocess
+import threading
+import time
 from typing import Any
 
 from minisweagent import Environment
@@ -32,12 +37,249 @@ from openhands.events.observation import (
 )
 from openhands.runtime.base import Runtime
 
+_TIMEOUT_MESSAGE_TEMPLATE = (
+    "You may wait longer to see additional output by sending empty command '', "
+    'send other commands to interact with the current process, '
+    'send keys ("C-c", "C-z", "C-d") to interrupt/kill the previous command before sending your new command, '
+    "or use the timeout parameter in execute_bash for future commands."
+)
+
+
+class _DockerExecSession:
+    def __init__(
+        self,
+        *,
+        docker_executable: str,
+        container_id: str,
+        base_cwd: str,
+        env_vars: dict[str, str],
+        forward_env: list[str],
+        no_change_timeout: int = 30,
+        poll_interval: float = 0.5,
+    ) -> None:
+        self.docker_executable = docker_executable
+        self.container_id = container_id
+        self.base_cwd = base_cwd or "/"
+        self.env_vars = env_vars
+        self.forward_env = forward_env
+        self.no_change_timeout = no_change_timeout
+        self.poll_interval = poll_interval
+        self._proc: subprocess.Popen[str] | None = None
+        self._reader_thread: threading.Thread | None = None
+        self._buffer = io.StringIO()
+        self._buffer_lock = threading.Lock()
+        self._consumed_pos = 0
+        self._last_output_time: float | None = None
+
+    @classmethod
+    def from_env(cls, env: Environment) -> "_DockerExecSession | None":
+        container_id = getattr(env, "container_id", None)
+        cfg = getattr(env, "config", None)
+        docker_executable = getattr(cfg, "executable", None) if cfg is not None else None
+        base_cwd = getattr(cfg, "cwd", "/") if cfg is not None else "/"
+        env_vars = getattr(cfg, "env", {}) if cfg is not None else {}
+        forward_env = getattr(cfg, "forward_env", []) if cfg is not None else []
+        if not container_id or not docker_executable:
+            return None
+        return cls(
+            docker_executable=str(docker_executable),
+            container_id=str(container_id),
+            base_cwd=str(base_cwd),
+            env_vars=dict(env_vars or {}),
+            forward_env=list(forward_env or []),
+        )
+
+    def _reset_buffer(self) -> None:
+        with self._buffer_lock:
+            self._buffer = io.StringIO()
+            self._consumed_pos = 0
+
+    def _consume_output(self) -> str:
+        with self._buffer_lock:
+            data = self._buffer.getvalue()
+            if self._consumed_pos >= len(data):
+                return ""
+            chunk = data[self._consumed_pos :]
+            self._consumed_pos = len(data)
+        return chunk
+
+    def _reader(self, stream: io.TextIOBase) -> None:
+        try:
+            while True:
+                chunk = stream.read(4096)
+                if not chunk:
+                    break
+                with self._buffer_lock:
+                    self._buffer.write(chunk)
+                    self._last_output_time = time.time()
+        except Exception:
+            pass
+
+    def _build_exec_cmd(self, cwd: str, command: str) -> list[str]:
+        cmd = [self.docker_executable, "exec", "-i", "-w", cwd]
+        for key in self.forward_env:
+            if (value := os.getenv(key)) is not None:
+                cmd.extend(["-e", f"{key}={value}"])
+        for key, value in self.env_vars.items():
+            cmd.extend(["-e", f"{key}={str(value)}"])
+        cmd.extend([self.container_id, "bash", "-lc", command])
+        return cmd
+
+    def _start_process(self, command: str, cwd: str) -> None:
+        self._reset_buffer()
+        exec_cmd = self._build_exec_cmd(cwd, command)
+        self._proc = subprocess.Popen(
+            exec_cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        self._last_output_time = time.time()
+        if self._proc.stdout is not None:
+            self._reader_thread = threading.Thread(
+                target=self._reader,
+                args=(self._proc.stdout,),
+                daemon=True,
+            )
+            self._reader_thread.start()
+
+    def _send_input(self, command: str) -> None:
+        if not self._proc or self._proc.stdin is None:
+            return
+        if command in {"C-c", "C-z"}:
+            sig = signal.SIGINT if command == "C-c" else getattr(signal, "SIGTSTP", None)
+            if sig is not None:
+                try:
+                    self._proc.send_signal(sig)
+                    return
+                except Exception:
+                    pass
+            try:
+                self._proc.stdin.write("\x03" if command == "C-c" else "\x1a")
+                self._proc.stdin.flush()
+            except Exception:
+                return
+        if command == "C-d":
+            try:
+                self._proc.stdin.write("\x04")
+                self._proc.stdin.flush()
+            except Exception:
+                try:
+                    self._proc.stdin.close()
+                except Exception:
+                    pass
+            return
+        try:
+            self._proc.stdin.write(command + "\n")
+            self._proc.stdin.flush()
+        except Exception:
+            return
+
+    def _finalize_process(self) -> int:
+        if not self._proc:
+            return 0
+        if self._reader_thread:
+            try:
+                self._reader_thread.join(timeout=1)
+            except Exception:
+                pass
+        returncode = self._proc.poll()
+        if returncode is None:
+            returncode = 0
+        self._proc = None
+        self._reader_thread = None
+        self._reset_buffer()
+        return returncode
+
+    def _wait_for_completion(
+        self,
+        *,
+        start_time: float,
+        hard_timeout: float | None,
+        allow_no_change: bool,
+    ) -> tuple[str, int, str]:
+        while True:
+            if self._proc is None:
+                return "", 0, "finished"
+            if self._proc.poll() is not None:
+                output = self._consume_output()
+                exit_code = self._finalize_process()
+                return output, exit_code, "finished"
+            now = time.time()
+            if hard_timeout is not None and now - start_time >= hard_timeout:
+                output = self._consume_output()
+                return output, -1, "timeout"
+            last_output = self._last_output_time or start_time
+            if allow_no_change and now - last_output >= self.no_change_timeout:
+                output = self._consume_output()
+                return output, -1, "no_change"
+            time.sleep(self.poll_interval)
+
+    def run(
+        self,
+        *,
+        command: str,
+        cwd: str,
+        hard_timeout: float | None,
+        is_input: bool,
+        blocking: bool,
+    ) -> tuple[str, int, str]:
+        if self._proc is not None and self._proc.poll() is not None:
+            self._consume_output()
+            self._finalize_process()
+        if self._proc is None:
+            if command == "":
+                return "ERROR: No previous running command to retrieve logs from.", -1, "no_prev"
+            if is_input:
+                return "ERROR: No previous running command to interact with.", -1, "no_prev"
+            self._start_process(command, cwd)
+            return self._wait_for_completion(
+                start_time=time.time(),
+                hard_timeout=hard_timeout,
+                allow_no_change=not blocking,
+            )
+        if not is_input and command != "":
+            output = self._consume_output()
+            if output:
+                output = "[Below is the output of the previous command.]\n" + output
+            output += (
+                f'\n[Your command "{command}" is NOT executed. '
+                "The previous command is still running - You CANNOT send new commands until the previous command is completed. "
+                f"{_TIMEOUT_MESSAGE_TEMPLATE}]"
+            )
+            return output, -1, "busy"
+        if command:
+            self._send_input(command)
+        return self._wait_for_completion(
+            start_time=time.time(),
+            hard_timeout=hard_timeout,
+            allow_no_change=not blocking,
+        )
+
+    def close(self) -> None:
+        if self._proc is None:
+            return
+        try:
+            self._proc.terminate()
+        except Exception:
+            pass
+        try:
+            self._proc.kill()
+        except Exception:
+            pass
+        self._proc = None
+        self._reader_thread = None
+        self._reset_buffer()
+
 
 class OpenHandsCompatRuntime(Runtime):
     """Runtime adapter that mirrors OpenHands tool behavior via mini-swe-agent."""
 
     def __init__(self, env: Environment, *args, **kwargs):
         self.env = env
+        self._cmd_session = _DockerExecSession.from_env(env)
         self._undo_backups: dict[str, str] = {}
         self._undo_created: set[str] = set()
         super().__init__(*args, **kwargs)
@@ -434,6 +676,11 @@ print(json.dumps({"ok": True, "items": items, "hidden_count": hidden_count}))
             self.event_stream.unsubscribe(EventStreamSubscriber.RUNTIME, self.sid)
         except Exception:
             pass
+        if self._cmd_session is not None:
+            try:
+                self._cmd_session.close()
+            except Exception:
+                pass
         try:
             cleanup = getattr(self.env, "cleanup", None)
             if callable(cleanup):
@@ -445,11 +692,45 @@ print(json.dumps({"ok": True, "items": items, "hidden_count": hidden_count}))
         return MCPConfig()
 
     def run(self, action: CmdRunAction) -> Observation:
+        cwd = action.cwd or ""
+        if self._cmd_session is not None:
+            try:
+                output, exit_code, status = self._cmd_session.run(
+                    command=action.command,
+                    cwd=cwd or self._cmd_session.base_cwd,
+                    hard_timeout=action.timeout,
+                    is_input=action.is_input,
+                    blocking=action.blocking,
+                )
+                if status == "no_change":
+                    suffix = (
+                        f"[The command has no new output after {self._cmd_session.no_change_timeout} seconds. "
+                        f"{_TIMEOUT_MESSAGE_TEMPLATE}]"
+                    )
+                    if output:
+                        output = "[Below is the output of the previous command.]\n" + output
+                    output = (output + "\n" if output else "") + suffix
+                elif status == "timeout":
+                    suffix = (
+                        f"[The command timed out after {action.timeout} seconds. {_TIMEOUT_MESSAGE_TEMPLATE}]"
+                    )
+                    if output:
+                        output = "[Below is the output of the previous command.]\n" + output
+                    output = (output + "\n" if output else "") + suffix
+                display_cwd = self._display_from_actual(cwd) if cwd else "/workspace"
+                metadata = {"exit_code": exit_code, "working_dir": display_cwd}
+                return CmdOutputObservation(
+                    content=output,
+                    command=action.command,
+                    metadata=metadata,
+                )
+            except Exception as e:  # pragma: no cover
+                ms_logger.error(f"[OpenHandsCompatRuntime] interactive run failed: {e}")
+                return ErrorObservation(f"Runtime execution failed: {e}")
         if action.is_input:
             return ErrorObservation(
                 "CLIRuntime does not support interactive input from the agent."
             )
-        cwd = action.cwd or ""
         try:
             result = self.env.execute(action.command, cwd=cwd)
             output = result.get("output", "")
