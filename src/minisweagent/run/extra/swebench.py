@@ -282,6 +282,7 @@ def process_instance(
                 max_steps=config.get("agent", {}).get("max_steps", 100),
                 run_id=instance_id,
                 repo_path=f"/workspace/{workspace_dir_name}",
+                base_commit=instance.get("base_commit"),
             )
             res = runner.run_instance(
                 task,

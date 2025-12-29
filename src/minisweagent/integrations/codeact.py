@@ -1,6 +1,7 @@
 ﻿import asyncio
 import json
 import os
+import shlex
 import threading
 import time
 import uuid
@@ -75,6 +76,7 @@ class CodeActRunner:
         file_store_root: str | None = None,
         run_id: str | None = None,
         repo_path: str | None = None,
+        base_commit: str | None = None,
     ):
         self.env = env
         self.llm_config = llm_config or {}
@@ -82,17 +84,54 @@ class CodeActRunner:
         self.file_store_root = file_store_root or str(get_repo_tmp() / "codeact_mswea_store")
         self.run_id = run_id
         self.repo_path = repo_path or "/testbed"
+        self.base_commit = base_commit
+
+    @staticmethod
+    def _remove_binary_diffs(patch_text: str) -> str:
+        lines = patch_text.splitlines()
+        cleaned_lines: list[str] = []
+        block: list[str] = []
+        is_binary_block = False
+
+        for line in lines:
+            if line.startswith("diff --git "):
+                if block and not is_binary_block:
+                    cleaned_lines.extend(block)
+                block = [line]
+                is_binary_block = False
+            elif "Binary files" in line:
+                is_binary_block = True
+                block.append(line)
+            else:
+                block.append(line)
+
+        if block and not is_binary_block:
+            cleaned_lines.extend(block)
+        return "\n".join(cleaned_lines)
+
+    @staticmethod
+    def _remove_binary_files_command() -> str:
+        return """
+        for file in $(git status --porcelain | grep -E "^(M| M|\\?\\?|A| A)" | cut -c4-); do
+            if [ -f "$file" ] && (file "$file" | grep -q "executable" || git check-attr binary "$file" | grep -q "binary: set"); then
+                git rm -f "$file" 2>/dev/null || rm -f "$file"
+                echo "Removed: $file"
+            fi
+        done
+        """.strip()
 
     def _collect_patch(self) -> str:
         """Collect working-tree diff from the task repo inside the container.
 
-        We stage all changes (including untracked files) to mirror the manual
-        `git add -A && git diff --cached` flow used by the CLI instructions and
-        then reset the index so we don't alter the working tree state.
+        We stage all changes (including untracked files), remove binary files from
+        staging, generate a patch against the base commit, and then reset the index
+        so we don't alter the working tree state.
         """
         repo_path = self.repo_path
+        repo_path_q = shlex.quote(repo_path)
+        base_commit = self.base_commit
         try:
-            status = self.env.execute(f"git -C {repo_path} status --porcelain")
+            status = self.env.execute(f"git -C {repo_path_q} status --porcelain")
         except Exception as e:  # pragma: no cover
             ms_logger.error(f"[CodeActRunner] failed to collect patch: {e}")
             return ""
@@ -106,26 +145,68 @@ class CodeActRunner:
             return ""
 
         try:
-            add_resp = self.env.execute(f"git -C {repo_path} add -A")
+            find_cmd = (
+                f"find {repo_path_q} -type d -name .git -not -path "
+                f"{shlex.quote(repo_path + '/.git')}"
+            )
+            find_resp = self.env.execute(find_cmd)
+            find_rc = find_resp.get("returncode", find_resp.get("exit_code", 0))
+            if find_rc == 0:
+                git_dirs = [
+                    p for p in (find_resp.get("output", "") or "").splitlines() if p.strip()
+                ]
+                for git_dir in git_dirs:
+                    rm_resp = self.env.execute(f"rm -rf {shlex.quote(git_dir)}")
+                    rm_rc = rm_resp.get("returncode", rm_resp.get("exit_code", 0))
+                    if rm_rc != 0:
+                        ms_logger.error(f"[CodeActRunner] failed to remove git dir {git_dir} rc={rm_rc}")
+            else:
+                ms_logger.error(f"[CodeActRunner] find .git dirs failed rc={find_rc}")
+
+            add_resp = self.env.execute(f"git -C {repo_path_q} add -A")
             add_rc = add_resp.get("returncode", add_resp.get("exit_code", 0))
             if add_rc != 0:
                 ms_logger.error(f"[CodeActRunner] git add failed rc={add_rc}")
                 return ""
 
-            diff_resp = self.env.execute(f"git -C {repo_path} diff --cached")
+            remove_binary_cmd = self._remove_binary_files_command()
+            bin_resp = self.env.execute(f"cd {repo_path_q} && {remove_binary_cmd}")
+            bin_rc = bin_resp.get("returncode", bin_resp.get("exit_code", 0))
+            if bin_rc != 0:
+                ms_logger.error(f"[CodeActRunner] remove binary files failed rc={bin_rc}")
+
+            if base_commit:
+                diff_cmd = f"git diff --no-color --cached {shlex.quote(base_commit)} > patch.diff"
+            else:
+                diff_cmd = "git diff --no-color --cached > patch.diff"
+            diff_resp = self.env.execute(f"cd {repo_path_q} && {diff_cmd}")
             diff_rc = diff_resp.get("returncode", diff_resp.get("exit_code", 0))
-            patch = diff_resp.get("output", "")
+            if diff_rc != 0 and base_commit:
+                ms_logger.error(
+                    f"[CodeActRunner] git diff base failed rc={diff_rc}, retrying without base"
+                )
+                diff_resp = self.env.execute(f"cd {repo_path_q} && git diff --no-color --cached > patch.diff")
+                diff_rc = diff_resp.get("returncode", diff_resp.get("exit_code", 0))
             if diff_rc != 0:
-                ms_logger.error(f"[CodeActRunner] git diff --cached failed rc={diff_rc}")
+                ms_logger.error(f"[CodeActRunner] git diff failed rc={diff_rc}")
                 return ""
+
+            patch_resp = self.env.execute(f"cd {repo_path_q} && cat patch.diff")
+            patch_rc = patch_resp.get("returncode", patch_resp.get("exit_code", 0))
+            patch = patch_resp.get("output", "")
+            if patch_rc != 0:
+                ms_logger.error(f"[CodeActRunner] cat patch.diff failed rc={patch_rc}")
+                return ""
+
             if patch and patch.strip():
+                patch = self._remove_binary_diffs(patch)
                 ms_logger.info(f"[CodeActRunner] collected git diff patch ({len(patch)} chars)")
                 return patch
             ms_logger.error("[CodeActRunner] staged changes detected but diff was empty")
             return ""
         finally:
             try:
-                self.env.execute(f"git -C {repo_path} reset")
+                self.env.execute(f"git -C {repo_path_q} reset")
             except Exception:
                 pass
 
